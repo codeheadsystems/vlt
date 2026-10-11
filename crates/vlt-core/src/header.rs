@@ -206,9 +206,28 @@ impl VaultKeys {
     }
 
     /// `K_mirror` of the current epoch.
-    #[allow(dead_code)]
     pub(crate) fn mirror_key(&self) -> MirrorKey {
         mirror_key(&self.vk, &self.vault_id)
+    }
+
+    /// `K_mirror` of an epoch of the current lineage up to the current one, for opening a mirror
+    /// `state` sealed before a rotation.
+    pub(crate) fn mirror_key_for(&self, epoch: u32) -> Option<MirrorKey> {
+        if epoch > self.epoch {
+            return None;
+        }
+        self.vk_of(&self.vault_id, epoch)
+            .map(|vk| mirror_key(vk, &self.vault_id))
+    }
+
+    /// The fingerprint of the vault key of `epoch` in the current lineage: the current epoch or
+    /// one in the keyring. The header pin's chain of custody checks a new header through it.
+    pub fn fingerprint_of(&self, epoch: u32) -> Option<[u8; 32]> {
+        if epoch > self.epoch {
+            return None;
+        }
+        self.vk_of(&self.vault_id, epoch)
+            .map(|vk| fingerprint(vk, &self.vault_id))
     }
 
     /// The rotation commitment, for the index acceptance rule.

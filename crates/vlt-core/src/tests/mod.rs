@@ -1,8 +1,11 @@
 //! Known-answer, malformed, tamper, and property tests. Every file in `spec/vectors/` has a harness
 //! here; [`vectors::every_vector_file_has_a_harness`] fails if one is added without one.
 
+mod merge;
 mod props;
 mod rules;
+mod sync;
+mod sync_props;
 mod vectors;
 
 use serde_json::Value;

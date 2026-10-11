@@ -18,12 +18,20 @@ pub mod index;
 pub mod kdf;
 pub mod keys;
 pub mod limits;
+pub mod merge;
+pub mod mirror_state;
+pub mod notice;
+pub mod ops;
 pub mod path;
+pub mod pins;
 mod prim;
+pub mod retention;
 mod rng;
 pub mod secret;
 pub mod secret_key_text;
+pub mod session;
 mod textcodec;
+pub mod vault;
 pub mod wrap;
 
 #[cfg(test)]

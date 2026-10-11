@@ -95,7 +95,7 @@ The requirements document holds the full threat model. The properties this spec 
 | Adversary | Property |
 | --- | --- |
 | Reader of the bucket, including all versions | Learns object count, sizes rounded to 512 bytes (entries) or 4,096 bytes (index), timestamps, the number of enrolled devices, the number, times, and device IDs of enrollment requests (abandoned ones included), and the plaintext counters `epoch`, `header_seq`, and `index_seq`. Learns no path, URL, username, secret, or device label |
-| Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On single-disk RustFS, which cannot version, the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost. Entry objects are hash-chained from the index, so an overwrite is detected even when the writer holds an old vault key, as a revoked device does |
+| Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On an unversioned bucket the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost. RustFS also lets a device key overwrite entry objects, because it has no condition key for conditional writes; on a versioned RustFS bucket the overwritten object survives as a noncurrent version. Entry objects are hash-chained from the index, so an overwrite is detected even when the writer holds an old vault key, as a revoked device does |
 | Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it, provided the secret key was rotated or the master password resists offline guessing (the holder knows the old secret key). While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
 | Holder of the current VK before revocation (a thief who unlocks a stolen device) | Is a full member until revoked: it can write any header or index that every device accepts, including a changed password wrap, extra device records, a new VK, and counters at their caps. vlt bounds the damage rather than preventing it: every header and index names its writer, implausible counter jumps are reported, revocation lists devices the lost device enrolled or that appeared recently, a changed password wrap is reported as tampering, and `vlt repair --rekey` rebuilds the vault in a new lineage from the master password and the emergency kit, which no forged counter or password wrap can block |
 | Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. A password change that the user marks as an exposure (`vlt passwd` asks) also rotates the vault key, which cuts this off for content written afterwards |
@@ -308,6 +308,10 @@ means the object already exists (a retried upload) and the client confirms the s
 Enrollment requests are small, immutable, and stay in the bucket after use, because device keys
 cannot delete.
 
+On AWS the device policy makes entry and enrollment keys write-once. RustFS cannot express that
+rule, so there a device key can overwrite them; a versioned bucket keeps the original as a
+noncurrent version, which no device key can delete.
+
 The prefix is 1 to 64 characters from `[A-Za-z0-9._/-]` and ends in `/`.
 
 ## Extension lists
@@ -476,10 +480,12 @@ start from the first index it accepts.
 Every header and index names its writer (`writer_device_id`, inside the MAC or the AEAD). A member
 can lie about it, so it is attribution, not authentication, but two checks use it:
 
-- A device records the SHA-256 of every header and index it publishes. A header or index that
-  names this device as writer but matches no recorded hash is an integrity error reporting that
-  another holder of the vault key wrote in this device's name. When the device's records do not
-  reach back that far (a restored or rebuilt `state`), it is a warning instead.
+- A device records the SHA-256 of every header and index it publishes, before the write that
+  publishes it. A header or index that names this device as writer but matches no recorded hash is
+  an integrity error reporting that another holder of the vault key wrote in this device's name.
+  The device keeps the records of each kind for 400 days or the latest 4,096, whichever keeps more.
+  When its records do not reach back that far (a restored or rebuilt `state`, or a header or index
+  older than the oldest kept record), it is a warning instead.
 - A header whose writer was not enrolled in the previously accepted header, or an index whose
   writer is not enrolled in the current header, is reported in the status line and by
   `vlt devices`.
@@ -668,15 +674,19 @@ a rebase, and it needs no clocks.
 Each operation carries an `op_seq`, a `u64` the device increments for every operation it queues,
 starting at 1 and never reused. The index's `applied` table records, per device, the highest
 `op_seq` already published. Replay skips any operation whose `op_seq` is at most the table's value
-for this device, and publishing sets the table's value to the highest `op_seq` replayed. A publish
-whose response was lost is therefore harmless to retry.
+for this device, and publishing sets the table's value to the highest `op_seq` processed, including
+operations that replay dropped, so a dropped operation is never replayed again. A publish whose
+response was lost is therefore harmless to retry.
 
 The counter must never go backwards, or the device's new operations would be skipped. A device
 therefore initialises its next `op_seq` to `applied[device_id] + 1` whenever it builds a mirror, and
 on every accepted index whose `applied[device_id]` is at least its next `op_seq` (a restored or
 stale `state`, or a value another member forged), it raises the counter past it, renumbers its
 queued operations above it, and reports the event in the status line with the index's writer. A
-value at the cap leaves no room and is an integrity error that names `vlt repair --rekey`.
+value at the cap leaves no room and is an integrity error that names `vlt repair --rekey`. A value
+that covers a queued `put` whose object this device has not yet uploaded cannot come from its own
+publish, so it is treated the same way. Otherwise the device drops from its queue every operation at
+or below the value, because an earlier publish whose response was lost already applied them.
 
 | Operation | Fields |
 | --- | --- |
@@ -703,6 +713,10 @@ head equals `expected_head`.
 ### Replay rules
 
 Let `remote` be the freshly fetched index. Each queued operation applies to `remote` in queue order.
+For each operation, the first row of the table that matches, in table order, applies.
+A `remove` that would add a tombstone with the same path and `removed_index_seq` as one added
+earlier in the same replay stops the replay before it; the operations replayed so far publish, and
+the rest publish in a further index straight afterwards.
 
 | Operation | Remote state | Result |
 | --- | --- | --- |
@@ -723,8 +737,10 @@ Let `remote` be the freshly fetched index. Each queued operation applies to `rem
 
 "Descends from the parent" is decided by walking the remote head's chain back while its revision is
 greater than the parent's; the walk is bounded by the revision difference and served from the mirror
-where possible. A walk that cannot complete (objects unavailable offline) treats the case as a
-concurrent edit.
+where possible. For a `put`, a walk that cannot complete (objects unavailable offline) treats the
+case as a concurrent edit. For a `move`, the same decides whether `from` holds a descendant of
+`expected_head`; a walk that cannot complete drops the move and reports it, so a move never applies
+to an entry that may be unrelated.
 
 A conflict at a path compares the two revisions by [revision order](#revision-order): the newer
 keeps the path and the other moves to a conflict path. Later queued operations whose target is the
@@ -734,8 +750,17 @@ A **conflict path** is `<path>.conflict-<label>`, where `<label>` is the label o
 wrote the losing revision (for a `move`, this device). If that device is no longer enrolled, the
 label is the first 8 hex characters of its device ID. If the path is taken, `-2`, `-3`, and so on
 are appended. If the result exceeds 1,024 bytes, the last segment of `<path>` is truncated at a
-character boundary to fit. The conflict copy points at the losing revision's object and carries the
-conflict-of item naming `<path>`; nothing is re-encrypted.
+character boundary to fit, keeping at least one character, and the `-2` suffixes are tried again on
+the truncated form. If even a one-character last segment does not fit, the parent segments leave
+no room, so the conflict copy goes to the top level as `<h>.conflict-<label>`, where `<h>` is the
+first 8 hex characters of the losing revision's object ID, with the same suffix rule. Its
+conflict-of item still names `<path>`, so `vlt conflicts` and `vlt resolve` pair it with its
+original. The conflict
+copy points at the losing revision's object and carries the conflict-of item naming `<path>`;
+nothing is re-encrypted. A loser that is already a conflict copy keeps its conflict-of item, which
+still names its first original, rather than gaining a second one. The loser is a changed record, so
+it keeps its copy-safe extension items, such as a history floor, and drops unknown items that are
+not copy-safe.
 
 Every conflict and every dropped or reported operation appears in the sync report
 (`vlt sync --json` lists them) and in the [status line](#status-line), so nothing is lost silently.
@@ -779,7 +804,9 @@ One sync is:
    fetch and check the header.
 3. Fetch any head entry objects missing from the mirror (the mirror keeps every head, so `grep` and
    offline reads work). With `mirror.history = full`, also fetch, in the background, any history
-   object reachable from a head or tombstone that the mirror lacks.
+   object reachable from a head or tombstone that the mirror lacks. A `404` for a live entry's head
+   is an integrity error naming `vlt repair`, because a purge always keeps the newest revision of a
+   live entry. A `404` for a tombstone's head means that it was purged.
 4. If the write queue is not empty, publish it (below).
 
 A command that cannot reach the backend because of a connection failure, DNS failure, or timeout
@@ -859,36 +886,59 @@ The **mirror** is a directory, `$XDG_DATA_HOME/vlt/<vault_id hex>/`, created wit
 | File | Contents |
 | --- | --- |
 | `header` | Last accepted header object, verbatim |
-| `index` | Last accepted index object, verbatim, and its etag |
-| `e/<object_id hex>` | Entry objects, verbatim. With `mirror.history = full`, every object reachable from a head or tombstone down to its history floor, which makes history and exports complete offline. With `mirror.history = heads`, every current head and tombstone head, plus history objects the user has displayed |
-| `state` | Pins, etags, the next `op_seq`, and the write queue, sealed with `K_mirror` |
+| `index` | Last accepted index object, verbatim |
+| `e/<object_id hex>` | Entry objects, verbatim. With `mirror.history = full`, every object reachable from a head or tombstone down to its history floor, which makes history and exports complete offline. With `mirror.history = heads`, every current head and tombstone head, plus history objects the user has displayed. Entry objects in the write queue also live here |
+| `state` | Pins, the etags and SHA-256 of the mirrored header and index, the next `op_seq`, the write queue, and the SHA-256 records of [writer checks](#writer-checks), sealed with `K_mirror` |
+| `lock` | Empty, mode `0600`; the file that mirror ownership locks |
 
 Objects in the mirror are the bucket's ciphertext, unchanged, so the mirror holds no plaintext and
 no new format.
 
 `state` layout: `"VLTS"`, `u16 1`, `u16 0`, `b16 vault_id`, `u32 epoch`, `b24 nonce`, then
 `AEAD(K_mirror, nonce, serialised state, bytes 0..52)`. The plaintext serialisation is internal to
-each client and is not part of the interchange format. The state is written to a temporary file,
-`fsync`ed, and renamed over the old one.
+each client and is not part of the interchange format. A client opens a `state` sealed under an
+earlier epoch with that epoch's `K_mirror` from the keyring, and seals it under the current epoch at
+its next write. It rejects a `state` with another `vault_id` or a later epoch than the header's.
 
-Publishing the queue:
+Every mirror file is written to a temporary file, `fsync`ed, and renamed over the old one, in the
+order `e/` objects, `header`, `index`, then `state`. `state` is the commit record: a `header` or
+`index` file whose SHA-256 differs from the one `state` records is the remnant of an interrupted
+write, and the client checks it against the pins as a newly fetched object or discards it and
+fetches again; it never trusts it on its own.
+
+Publishing the queue starts with a `GET` of the header with `If-None-Match` on its etag, so that a
+header change that no index announced yet (a rotation interrupted between its header and index
+writes) is seen before anything is sealed. A changed header is checked as in [header
+pinning](#header-authentication-and-pinning). This costs one request per publish, usually a `304`.
 
 1. In queue order, re-seal every queued entry object that was sealed under a `(vault_id, epoch)`
    other than the header's, or whose `parent_object_id` names an object re-sealed in this step: new
    plaintext with the updated parent and `parent_sha256`, current epoch, fresh `object_id`. Rewrite
    every later operation's `parent_object_id`, `object_sha256`, and `expected_head` that names an
-   old object. Old objects may already
-   be in the bucket; they stay unreferenced.
+   old object. Old objects may already be in the bucket; they stay unreferenced.
 2. `PUT` each queued entry object with `If-None-Match: *`. On `412`, `GET` the object and require
-   identical bytes; anything else is an integrity error.
-3. Fetch the index (unconditional on retry), check pins, replay the queued operations, set
-   `index_seq` to the fetched value plus one, and seal under the header's current epoch.
-4. `PUT` the index with `If-Match: <fetched etag>`. On `412`, go back to step 3, up to eight
-   attempts with jittered backoff from 100 ms.
+   identical bytes; different bytes or a `404` are an integrity error, and a connection failure
+   leaves the queue for a later publish. A `503` or other `5xx` on a conditional
+   `PUT` is retried with the same backoff and does not count as a precondition failure.
+3. Fetch the index (unconditional on retry) and check it against the pins. If its `header_seq` is
+   above the pinned one, fetch and check the header first; if the header's `vault_id` or epoch has
+   changed, go back to step 1. If the index is an epoch-`e` index under an epoch-`e + 1` header that
+   does not match the rotation commitment (rotation pending), stop and keep the queue. Otherwise
+   replay the queued operations, set `index_seq` to the fetched value plus one, and seal under the
+   header's current epoch.
+4. Record the SHA-256 of the new index in `state` as this device's own (see [writer
+   checks](#writer-checks)), then `PUT` the index with `If-Match: <fetched etag>`. On `412`, go back
+   to step 3, up to eight attempts with jittered backoff from 100 ms. After the eighth `412` the
+   publish fails with exit code 7, the queue stays, and the agent records the failure as
+   `last_publish_error`.
 5. On success, clear the queue, update the pins, and report conflicts.
 
-Only one process owns a mirror at a time: the agent if it is running, otherwise the CLI process,
-which takes an exclusive `flock` on `state`.
+The hash is recorded before the `PUT` so that a crash after a successful `PUT` does not leave this
+device unable to recognise its own index. A recorded hash whose `PUT` failed is harmless.
+
+Only one process owns a mirror at a time: the agent if it is running, otherwise the CLI process.
+The owner holds an exclusive `flock` on the mirror's `lock` file. `state` cannot carry the lock,
+because each write replaces it with a new file.
 
 The default depends on the platform:
 
@@ -1094,20 +1144,22 @@ because device keys cannot delete.
 1. `GetBucketVersioning`, `GetObjectLockConfiguration`, and `GetBucketLifecycleConfiguration`.
    Apply the table below; a refusal stops here, with nothing written.
 2. `ListObjectVersions` on the bucket root with `max-keys=1`. Refuse if it returns any object
-   version or delete marker, inside or outside the prefix: vault and bucket are one-to-one. A
-   backend that does not implement `ListObjectVersions` (an unversioned RustFS) gets
-   `ListObjectsV2` with the same rule.
+   version or delete marker, inside or outside the prefix: vault and bucket are one-to-one. RustFS
+   implements `ListObjectVersions` on unversioned buckets too, listing each object once with
+   version ID `null`. A backend that answers `501 NotImplemented` gets `ListObjectsV2` with the same
+   rule.
 3. `PUT <prefix>header` with `If-None-Match: *`. Expect `200`.
 4. `PUT <prefix>header` again, same bytes, `If-None-Match: *`. Expect `412`.
 5. `PUT <prefix>header`, same bytes, `If-Match: "00000000000000000000000000000000"`. Expect `412`.
 6. `PUT <prefix>header`, same bytes, `If-Match: <etag from step 3>`. Expect `200`.
 7. `PUT <prefix>index` with `If-None-Match: *`. Expect `200`.
 
-Any other result in steps 3 to 7 means the backend does not honour conditional writes, and
-`vlt init` or `vlt attach` refuses with exit code 8. The probe bodies are the real header and index,
-so a backend that ignores the conditions has only rewritten identical bytes. The bucket then holds a
-header; the error prints the admin command that empties it. A refusal in step 2 for a bucket that
-already holds a vlt header under the prefix suggests `vlt enroll` instead.
+A `503` or other `5xx` is retried with backoff (RustFS answers `503 SlowDownRead` under lock
+contention). Any other result in steps 3 to 7 means the backend does not honour conditional writes,
+and `vlt init` or `vlt attach` refuses with exit code 8. The probe bodies are the real header and
+index, so a backend that ignores the conditions has only rewritten identical bytes. The bucket then
+holds a header; the error prints the admin command that empties it. A refusal in step 2 for a bucket
+that already holds a vlt header under the prefix suggests `vlt enroll` instead.
 
 | Backend | Versioning | Object Lock | Result |
 | --- | --- | --- | --- |
@@ -1115,14 +1167,25 @@ already holds a vlt header under the prefix suggests `vlt enroll` instead.
 | AWS | On | Off | Continue, and note that Object Lock is available |
 | AWS | On | On | Continue; warn if no lifecycle rule keeps noncurrent versions at least 365 days |
 | Other S3 (RustFS) | On | Any | Continue |
-| Other S3 (RustFS) | Off | Any | Warn: "Without versioning a stolen device key can overwrite history; vlt's mirrors are the only copy." Continue |
+| Other S3 (RustFS) | Off | Any | Warn: "Without versioning a stolen device key can overwrite history and entries; vlt's mirrors are the only copy." Continue |
+
+On RustFS a single drive versions as well as an erasure set does; vlt decides from
+`GetBucketVersioning`, never from the layout. Without versioning, the warning also covers entry
+objects, because RustFS does not make them write-once.
+
+vlt addresses RustFS path-style; RustFS serves virtual-host requests only when
+`RUSTFS_SERVER_DOMAINS` is set. RustFS accepts any SigV4 region; vlt signs with `us-east-1` unless
+the user names another.
 
 `vlt doctor` repeats steps 1, 4, 5, and 6 against the existing header (step 6 re-puts the current
 bytes), and also checks:
 
 - that the device key cannot delete: `DeleteObject` for a non-existent key returns `403`;
-- that entry keys are write-once: an unconditional `PUT`, a `PUT` with `If-None-Match: "x"`, and a
-  `CreateMultipartUpload`, each to a fresh entry key, are all refused;
+- on AWS, that entry keys are write-once: an unconditional `PUT`, a `PUT` with
+  `If-None-Match: "x"`, and a `CreateMultipartUpload`, each to a fresh entry key, are all refused.
+  RustFS cannot enforce this, and the probes would leave a stray object and a dangling multipart
+  upload that the device key cannot remove, so on RustFS `vlt doctor` skips them, reports "entry
+  keys are not write-once on this backend", and fails if versioning is off;
 - the bucket's total stored bytes, including noncurrent versions;
 - KDF parameters above the calibration set (`m_kib` over 256 MiB, `t` over 3, or `p` over 1), which
   a member could have set to slow password unlock on phones.
@@ -1133,7 +1196,7 @@ Each device has its own long-lived IAM access key, scoped to the vault's bucket 
 never holds admin credentials: vault creation, enrollment, and revocation print the commands, and
 the user runs them with admin credentials elsewhere.
 
-Device policy (`BUCKET` and `PREFIX` substituted):
+AWS device policy (`BUCKET` and `PREFIX` substituted):
 
 ```json
 {
@@ -1195,7 +1258,7 @@ What each statement enforces against a stolen device key:
 | --- | --- |
 | Object `Allow` on four key patterns | Reads and writes only the header, the index, entry objects, and enrollment requests; no other key under the prefix can be created |
 | Bucket `Allow` | Listing and the settings reads the capability probe needs. `ListBucket` is not limited to the prefix, because the probe checks that the bucket is dedicated; the bucket is dedicated, so this exposes nothing else |
-| `Deny` without `If-None-Match` on `e/*` and `enroll/*` | Entry objects and enrollment requests are write-once, using the condition key S3 provides for conditional writes. It also blocks multipart uploads to those keys, which vlt never uses |
+| `Deny` without `If-None-Match` on `e/*` and `enroll/*` | (AWS only) Entry objects and enrollment requests are write-once, using the condition key S3 provides for conditional writes. It also blocks multipart uploads to those keys, which vlt never uses |
 | `Deny` on storage class and encryption headers | A writer cannot re-store the header or index in an archive class or under a KMS or customer-provided key that would make reads fail. Each statement pairs a `Null` test with the comparison, so it denies only a request that carries the header with another value; a request without the header, which is what clients send, is allowed. (`StringNotEqualsIfExists` would not do: in a `Deny` it matches requests without the header too, and would refuse every write) |
 | `Deny` on delete, retention, ACL, and bucket changes | History and bucket settings are out of reach |
 
@@ -1235,27 +1298,85 @@ aws iam list-users --path-prefix '/vlt/V/' --query 'Users[].UserName' --output t
 A device record with no IAM user, or an IAM user with no device record, is a sign of tampering or
 of an abandoned invite.
 
-RustFS equivalents use `mc admin` against the RustFS alias `A`, with a policy document that has the
-same `Allow` statements (RustFS denies anything not allowed, so the `Deny` statement is kept for
-clarity):
+RustFS uses its own policy, because it rejects a document that names an action or condition key it
+does not know, accepts no action wildcards other than `s3:*`, and names lifecycle and encryption
+actions differently. The RustFS device policy drops the `If-None-Match` statement, which RustFS
+cannot express, and uses RustFS's action names:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"],
+      "Resource": ["arn:aws:s3:::BUCKET/PREFIXheader", "arn:aws:s3:::BUCKET/PREFIXindex",
+                   "arn:aws:s3:::BUCKET/PREFIXe/*", "arn:aws:s3:::BUCKET/PREFIXenroll/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions", "s3:GetBucketVersioning",
+                 "s3:GetBucketObjectLockConfiguration", "s3:GetBucketLifecycle"],
+      "Resource": "arn:aws:s3:::BUCKET"
+    },
+    {
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::BUCKET/*",
+      "Condition": {"Null": {"s3:x-amz-storage-class": "false"},
+                    "StringNotEquals": {"s3:x-amz-storage-class": "STANDARD"}}
+    },
+    {
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::BUCKET/*",
+      "Condition": {"Null": {"s3:x-amz-server-side-encryption": "false"},
+                    "StringNotEquals": {"s3:x-amz-server-side-encryption": "AES256"}}
+    },
+    {
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::BUCKET/*",
+      "Condition": {"Null": {"s3:x-amz-server-side-encryption-customer-algorithm": "false"}}
+    },
+    {
+      "Effect": "Deny",
+      "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion", "s3:ForceDeleteObject",
+                 "s3:PutBucketVersioning", "s3:PutBucketLifecycle", "s3:PutBucketPolicy",
+                 "s3:PutBucketObjectLockConfiguration", "s3:PutBucketEncryption",
+                 "s3:PutObjectRetention", "s3:PutObjectLegalHold",
+                 "s3:BypassGovernanceRetention", "s3:PutObjectAcl", "s3:PutBucketAcl",
+                 "s3:DeleteBucket", "s3:ForceDeleteBucket", "s3:DeleteBucketPolicy"],
+      "Resource": ["arn:aws:s3:::BUCKET", "arn:aws:s3:::BUCKET/*"]
+    }
+  ]
+}
+```
+
+RustFS evaluates the storage-class and encryption conditions as AWS does. RustFS denies anything not
+allowed, so the last statement only documents intent.
+
+The RustFS commands use RustFS's client `rc` against the alias `A`; `mc admin` takes the same
+arguments, with `user remove` and `user list` for `rc`'s `user rm` and `user ls`. The command
+`mc admin user list` truncates long names unless given `--json`.
 
 ```sh
 secret=$(head -c 30 /dev/urandom | base64 | tr -d '+/=')
-mc admin policy create A vlt-device-V /dev/stdin <<'EOF'
-<device policy>
+rc admin policy create A vlt-device-V /dev/stdin <<'EOF'
+<RustFS device policy>
 EOF
-mc admin user add A 'vlt-V-D' "$secret"
-mc admin policy attach A vlt-device-V --user 'vlt-V-D'
+rc admin user add A 'vlt-V-D' "$secret"
+rc admin policy attach A vlt-device-V --user 'vlt-V-D'
 printf '{"AccessKey":{"AccessKeyId":"vlt-V-D","SecretAccessKey":"%s"}}\n' "$secret"
 # revoke
-mc admin user remove A 'vlt-V-D'
-mc admin user list A
+rc admin user rm A 'vlt-V-D'
+echo 'Remaining vlt users; each should match a device in vlt devices:'
+rc admin user ls A --json | grep -o '"accessKey": *"vlt-V-[^"]*"'
 ```
 
 The RustFS commands end by printing the key in the same JSON shape as `aws iam create-access-key`,
-so vlt reads the key the same way on both backends. The exact RustFS command set is checked against
-RustFS's documentation and the integration tests in milestone 2, including which of the policy's
-condition keys RustFS enforces, and this section is corrected if it differs.
+so vlt reads the key the same way on both backends. Checked against RustFS 1.0.1 with `rc` 0.1.36
+and `mc` RELEASE.2025-08-13.
 
 ### Setup and teardown scripts
 
@@ -1280,19 +1401,20 @@ invite, vlt shows the parsed bucket, region, and endpoint and asks for confirmat
 
 | Script | Printed by | Contents |
 | --- | --- | --- |
-| Setup | `vlt init`, `vlt init --print-setup` | Create the bucket, keeping S3 Block Public Access on; enable versioning; add lifecycle rules, filtered to the keys `<prefix>header` and `<prefix>index`, that expire their noncurrent versions after 365 days; Object Lock in governance mode and an AWS Budgets alarm at $2 a month, both as commented-out lines (the alarm needs an email address); then the device commands above |
+| Setup | `vlt init`, `vlt init --print-setup` | Create the bucket, keeping S3 Block Public Access on; enable versioning; add lifecycle rules, filtered to the keys `<prefix>header` and `<prefix>index`, that expire their noncurrent versions after 365 days; Object Lock in governance mode and an AWS Budgets alarm at $2 a month, both as commented-out lines (the alarm needs an email address); then the device commands above. On RustFS the setup script creates the bucket with `rc bucket create --with-versioning A/BUCKET` (or `mc mb` then `mc version enable`), with `--with-lock` on the commented-out Object Lock line, and adds the same filtered lifecycle rules; there is no Block Public Access setting and no budget alarm |
 | Device | `vlt invite`, and `vlt enroll` on the kit path | The device commands above |
 | Revocation | `vlt revoke` | The revocation commands above; the script looks up the access key IDs itself |
-| Teardown | `vlt teardown` | Delete every object version and delete marker in the bucket, then the bucket, then every IAM user under the vault's IAM path, which covers enrolled devices and pending invites |
+| Teardown | `vlt teardown` | Delete every object version and delete marker in the bucket, then the bucket, then every IAM user under the vault's IAM path, which covers enrolled devices and pending invites. On RustFS, which has no IAM paths, every user whose name starts with `vlt-V-`, then the policy `vlt-device-V` |
 
 The lifecycle rules match only the header and index keys. An entry object or request is written once
-by honest clients, but a stolen device key can `PUT` over one; on a versioned bucket the original
-becomes a noncurrent version, which a rule covering the whole prefix would expire after a year.
-Scoping the rules keeps every noncurrent entry version.
+by honest clients, but on RustFS a stolen device key can `PUT` over one; on a versioned bucket the
+original becomes a noncurrent version, which a rule covering the whole prefix would expire after a
+year. Scoping the rules keeps every noncurrent entry version.
 
 Object Lock is optional. Governance mode lets an admin with `s3:BypassGovernanceRetention` purge and
 tear down; compliance mode would block both until retention expires, so the script does not offer
-it.
+it. RustFS needs the same bypass for teardown and purge: an admin `DELETE ?versionId=` under default
+retention returns `403` until the request carries `x-amz-bypass-governance-retention: true`.
 
 `vlt teardown` only prints. It runs on an enrolled device, which knows the device labels, and it
 reminds the user to write an export first.
@@ -1635,7 +1757,7 @@ confirmation.
 | Header overwritten or corrupt (unversioned backend) | Re-`PUT` the mirrored header bytes with `If-Match`; equal `header_seq` and identical bytes satisfy every pin |
 | Head entry object fails authentication or its hash (overwritten on an unversioned backend) | Take the good copy from the mirror, write its content as a new revision with a fresh `object_id` whose parent is the damaged object's parent, and point the index at it. History behind the damaged object survives only where a mirror or S3 version holds it |
 | A history floor with objects still present below it (a floor a member wrote without a purge) | List the entries, the floors, and the writer of the index that set them, and publish the index with each floor lowered to the oldest revision still fetchable |
-| History object fails its hash (overwritten on an unversioned backend) | Read it from any mirror whose copy matches the hash. A history object cannot be rewritten, because entry keys are write-once, so where no mirror holds it, `vlt log` and rekey end that chain there and list it |
+| History object fails its hash (overwritten on an unversioned backend) | Read it from any mirror whose copy matches the hash. A well-behaved client never rewrites a history object, and on AWS the device policy forbids it; on a versioned RustFS bucket the original survives as a noncurrent version. Where no mirror or version holds it, `vlt log` and rekey end that chain there and list it |
 | A member forged the vault state: a password wrap that the correct password no longer opens, counters at the cap, or unknown devices that cannot be revoked normally | `--rekey`, below |
 
 ### Rekey

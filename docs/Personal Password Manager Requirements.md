@@ -31,7 +31,7 @@ The bucket is treated as hostile: anything that can read it must learn nothing b
 | Adversary | Can do | Must not be able to |
 | --- | --- | --- |
 | AWS / anyone reading the bucket | Read all objects and versions | Read any secret, entry name, URL or username |
-| Thief with a device's AWS key | Read all objects; write new objects and new versions | Decrypt anything; permanently destroy history on a versioned bucket (on single-disk RustFS, which cannot version, the thief can overwrite history; `vlt init` warns about this) |
+| Thief with a device's AWS key | Read all objects; write new objects and new versions | Decrypt anything; permanently destroy history on a versioned bucket (on an unversioned bucket the thief can overwrite history; `vlt init` warns about this. RustFS cannot make entry objects write-once, so a thief with a RustFS device key can overwrite them; on a versioned RustFS bucket the original survives as a noncurrent version) |
 | Thief with a powered-off or locked device | Copy the local cache and device key file | Unlock without the master password, device biometric, or OS login (the CLI keeps its device key in the OS keyring, or wraps it with the master password where no keyring exists) |
 | Malicious web page | Trigger autofill prompts | Receive credentials for a different origin |
 | Me, months later | Forget the master password while at least one device is still enrolled | Lose the vault (an enrolled device that unlocks without the password sets a new one) |
@@ -111,7 +111,7 @@ vlt talks to any S3-compatible endpoint, chosen at `vlt init` (endpoint URL, buc
 | Backend | Use | History comes from |
 | --- | --- | --- |
 | AWS S3, existing account | Default; reachable from every device. Dedicated bucket, versioning required, Object Lock recommended; IAM key per device as above | S3 Versioning plus vlt's client-side history |
-| RustFS, single disk | Simplest self-hosted setup, no AWS at all | vlt's client-side history only (RustFS cannot version objects without erasure coding, [per its docs](https://docs.rustfs.com/features/versioning)) |
+| RustFS, single disk | Simplest self-hosted setup, no AWS at all | vlt's client-side history, plus RustFS object versioning when I enable it on the bucket (RustFS 1.0.1 versions on a single drive, despite [its docs](https://docs.rustfs.com/features/versioning); vlt decides from `GetBucketVersioning`, never from the disk layout) |
 | RustFS, 4+ disks with erasure coding | Self-hosted with server-side protection | RustFS object versioning plus vlt's client-side history |
 
 Two requirements fall out of this:
@@ -197,7 +197,7 @@ The bar: cheaper than free-tier anxiety, fast enough to feel like pass, and impo
 | Sync | A change on one device is visible on another within 10 s of the next sync |
 | Scale | 5,000 entries without a noticeable slowdown; index under 1 MB |
 | Portability | One Rust core: native CLI for Linux x86\_64 and arm64 and FreeBSD amd64; UniFFI bindings for Android 10+; WASM build for Firefox ESR and current |
-| Durability | Client-side revision history on every backend; on AWS, S3 Versioning on with noncurrent versions kept 365 days by lifecycle rule, optional Object Lock; on RustFS, versioning when run with erasure coding |
+| Durability | Client-side revision history on every backend; on AWS, S3 Versioning on with noncurrent versions kept 365 days by lifecycle rule, optional Object Lock; on RustFS, versioning when enabled on the bucket (single drive or erasure coding) |
 | Backup | `vlt export --encrypted` writes a single self-contained file I can store offline |
 | Recovery | Printable emergency kit (secret key, bucket name, recovery steps); vault opens from the kit plus master password on a fresh machine |
 | Auditability | Open source; crypto design written down in a short spec before code; reproducible CLI builds |
@@ -238,7 +238,7 @@ The big decisions were made on 2026-10-10; what remains can be settled in the sp
 | Implementation stack | Rust. One core for the native CLI (Linux, FreeBSD), Android via UniFFI, Firefox via WASM |
 | Storage model | Per-entry objects plus an encrypted index; revisit only if a concrete problem shows up |
 | Storage backend | AWS S3 in an existing account, or self-hosted RustFS |
-| RustFS layouts | Both supported: single disk (history in vlt) and 4+ disks with erasure coding (object versioning on as well) |
+| RustFS layouts | Both supported: single disk and 4+ disks with erasure coding; object versioning is on whenever the bucket has it enabled, and vlt decides from `GetBucketVersioning`, not the layout |
 | GPG compatibility | Not needed; pass interop through import and export only |
 | Security-key unlock | Later revision |
 | Passkey storage | Later revision |
@@ -248,9 +248,9 @@ The big decisions were made on 2026-10-10; what remains can be settled in the sp
 | Crypto crates | RustCrypto (`argon2`, `chacha20poly1305`, `x25519-dalek`, `ml-kem`, `hkdf`, `sha2`, `zeroize`); XChaCha20-Poly1305 for AEAD; device wraps use a hybrid of X25519 and ML-KEM-768 so recorded ciphertext resists a future quantum computer |
 | Credential lifetime | Long-lived IAM access key per device, scoped to the vault prefix; short-lived credentials (STS or IAM Roles Anywhere) are out of scope for v1 |
 | AWS hardening | Dedicated bucket required; `vlt init` refuses to proceed if versioning is off and warns if Object Lock is off |
-| Single-disk RustFS | Supported with a weaker guarantee: without versioning, a stolen device key can overwrite history. `vlt init` warns. Entry objects are always written with `If-None-Match: *` |
+| Unversioned RustFS bucket | Supported with a weaker guarantee: without versioning, a stolen device key can overwrite history and entries. `vlt init` warns. Entry objects are always written with `If-None-Match: *`; on AWS the device policy makes them write-once, which RustFS cannot enforce, so on a versioned RustFS bucket an overwritten original survives as a noncurrent version |
 | CLI device key at rest | OS keyring (Secret Service or KWallet) when available; otherwise wrapped by the master password |
-| IAM provisioning | vlt never holds admin credentials; enrollment and revocation print the IAM policy and `aws` (or RustFS `mc admin`) commands for me to run |
+| IAM provisioning | vlt never holds admin credentials; enrollment and revocation print the IAM policy and `aws` (or RustFS `rc admin`) commands for me to run |
 | Local start | `vlt init --local` (CLI and Android) creates a vault with no bucket; `vlt attach` uploads it to a bucket later, resumably, after which devices can enroll. Firefox cannot start local |
 | Licence | MIT; every dependency MIT, Apache-2.0, BSD, ISC, Zlib, or Unicode, enforced with `cargo-deny` |
 

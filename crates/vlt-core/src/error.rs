@@ -19,6 +19,9 @@ pub enum Error {
     InvalidInput(InputKind),
     /// The operating system random number generator failed.
     Rng,
+    /// The index changed under every one of the publish attempts the spec allows. The write queue
+    /// is kept. Maps to CLI exit code 7.
+    PublishContention,
 }
 
 /// The decode rule an object broke.
@@ -65,6 +68,30 @@ pub enum IntegrityKind {
     SkCheck,
     Rotation,
     HeadMismatch,
+    /// A header older than the pinned one.
+    HeaderRollback,
+    /// A header with the pinned `header_seq` but different bytes.
+    HeaderFork,
+    /// An index older than the pinned one.
+    IndexRollback,
+    /// An index with the pinned `index_seq` but a different hash.
+    IndexFork,
+    /// A vault key fingerprint that does not match the pin.
+    PinFingerprint,
+    /// An epoch more than 16 past the pinned one.
+    EpochJump,
+    /// A header or index that names this device as writer but that this device did not write.
+    ForgedWriter,
+    /// An index that names a `header_seq` newer than the header in the bucket.
+    IndexHeaderSeq,
+    /// A live entry's head that the backend no longer holds.
+    HeadMissing,
+    /// A stored object that differs from the bytes this device wrote under the same key.
+    ObjectMismatch,
+    /// A mirror file that does not match the mirror's own records.
+    MirrorMismatch,
+    /// The header or index is missing from the backend.
+    ObjectMissing,
 }
 
 /// The rule a caller-supplied value broke.
@@ -91,6 +118,10 @@ pub enum InputKind {
     Ext,
     ParentRule,
     UnknownLineage,
+    /// No entry at that path or with that head.
+    NotFound,
+    /// The destination path already holds an entry.
+    PathTaken,
 }
 
 impl fmt::Display for Error {
@@ -106,6 +137,9 @@ impl fmt::Display for Error {
             Error::SecretKeyTypo => f.write_str("the secret key has a typo"),
             Error::InvalidInput(k) => write!(f, "invalid input: {k:?}"),
             Error::Rng => f.write_str("the system random number generator failed"),
+            Error::PublishContention => {
+                f.write_str("the vault index kept changing while publishing; changes stay queued")
+            }
         }
     }
 }

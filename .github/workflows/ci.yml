@@ -56,3 +56,29 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+
+  rustfs:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [single, multi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Start RustFS (${{ matrix.layout }})
+        run: |
+          scripts/rustfs-up.sh ${{ matrix.layout }} > rustfs.env
+          cat rustfs.env >> "$GITHUB_ENV"
+      - name: Pull the rc admin client
+        run: docker pull rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
+      - run: cargo test -p vlt-store --test rustfs
+        env:
+          VLT_TEST_RUSTFS: "1"
+          VLT_REQUIRE_RUSTFS: "1"
+      - name: RustFS logs
+        if: failure()
+        run: docker logs "$VLT_RUSTFS_CONTAINER"
+      - name: Stop RustFS
+        if: always()
+        run: scripts/rustfs-down.sh ${{ matrix.layout }}

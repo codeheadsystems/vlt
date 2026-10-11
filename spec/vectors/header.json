@@ -1,0 +1,45 @@
+{
+  "description": "Full header, format version 1, test_kdf flag set, epoch 2 with epoch 1 in the keyring, two devices. Unlock with the password and secret key from kdf.json (test parameters, non-NFKC password) or with either device key from wraps.json.",
+  "inputs": {
+    "password_utf8": "636f727265637420686f72736520efac81206261747465727920e285ab",
+    "secret_key": "3f626ae58f2d93ebcfb291c85cffcf5b",
+    "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+    "header_seq": 4,
+    "epoch": 2,
+    "kdf": {
+      "alg": 1,
+      "m_kib": 64,
+      "t": 1,
+      "p": 1,
+      "kdf_salt": "657bec8a77e55d88c5d8e43b23aa75ed"
+    },
+    "vk": "73c92df917bd24579d72aa3be17e65842fdc72418b8d8eec873e716809878a15",
+    "keyring": [
+      {
+        "epoch": 1,
+        "vk": "fe87f69fa2f4da9b4450bd0e4fb111c29f7425e3369f0159b941d2af4dc1aab7"
+      }
+    ],
+    "devices": [
+      {
+        "device_id": "2d279757a0e3cd231ea32cbb4a06a22e",
+        "kind": 1,
+        "label": "laptop",
+        "enrolled_header_seq": 1
+      },
+      {
+        "device_id": "5dec0c2b18b567ae95c8cf3b9fa4a3ea",
+        "kind": 2,
+        "label": "pixel",
+        "enrolled_header_seq": 3
+      }
+    ],
+    "meta_nonce": "e40404fc04e8c5c42f143230967ae1db9991b6e652bdecf5"
+  },
+  "meta_plain": "0000000100000001fe87f69fa2f4da9b4450bd0e4fb111c29f7425e3369f0159b941d2af4dc1aab700022d279757a0e3cd231ea32cbb4a06a22e0100066c6170746f7000000000000000015dec0c2b18b567ae95c8cf3b9fa4a3ea020005706978656c0000000000000003",
+  "meta_ad": "766c742f76312f6d6574617f9c67544c9db6e3ee2a2d77fd1e1be300000002",
+  "meta_ct": "0fc1889b351af27d2276740bbd7e9db2416c1febdfbd6e127594b3da5016bb60015b6866937073cee756ad9bd43ba51942cdada1f123e536d7d082dd1305cf26c3e9ee8ed565e2316f5ca612db53fafeb6e0ccd6ef250af6c1d15064a7a7f0cc4c1848d8c9fa3157ad15ae180dc32ff7f98a78c0aaf9f771261340",
+  "k_header_mac": "eadec4ea42e570e2fe12f832ea55bf4831b85bb9b28b4a86098f3f748520eda1",
+  "mac": "b4271983e52378d9588f77ec5c02db870ad8b79b45832b8d5f4c53a0bb9f1952",
+  "header": "564c5448000100017f9c67544c9db6e3ee2a2d77fd1e1be300000000000000040000000201000000400000000100000001657bec8a77e55d88c5d8e43b23aa75ed331d20e96f38bcd5e2f4d0c573388974a63ba8293b799a58449f8e361cdc16fa4fc9b01134c80428254964bce5c26ab791a4d70136b43509bb0554fb1eba8f83667c73276b1bbff800022d279757a0e3cd231ea32cbb4a06a22efd5c24e7f2e8e4d9ed781d38cc7f9200b4584deda9a82c844f142f62263cf447bc742bf3e1a59bdded515425b34928bf7626d5f6456d9accd5c9fa52e47b115d3244f2afd680972416802a3e3743c27e972985bc8b4efaea895e69077a9e784504c883a2b375fe75b29d81dc797952705b5cd7af3ae27fc76e3d6e98961fa6403742a7d54e6efcc95dec0c2b18b567ae95c8cf3b9fa4a3ead3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd46f27c990db1c3c9b43caca4f4b1edcb0cfd465d3dcc76aea7bd2cc80ddc20b25e2de0d8cf7ae16fa1e274ad6c8069a1ffeb45df4e1c65c2db7f900728f3cb0bbb236d46a98335bcebc32f9d771f49bd225e6f44a0c2ba48f6f100bfb379bb982c359a4cb1824cae27e40404fc04e8c5c42f143230967ae1db9991b6e652bdecf50000007b0fc1889b351af27d2276740bbd7e9db2416c1febdfbd6e127594b3da5016bb60015b6866937073cee756ad9bd43ba51942cdada1f123e536d7d082dd1305cf26c3e9ee8ed565e2316f5ca612db53fafeb6e0ccd6ef250af6c1d15064a7a7f0cc4c1848d8c9fa3157ad15ae180dc32ff7f98a78c0aaf9f771261340b4271983e52378d9588f77ec5c02db870ad8b79b45832b8d5f4c53a0bb9f1952"
+}

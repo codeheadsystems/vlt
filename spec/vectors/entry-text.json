@@ -1,0 +1,198 @@
+{
+  "description": "Entry text parsing. notes is null when there is no remainder. Field values exclude the trailing \\r of CRLF lines; notes are verbatim.",
+  "cases": [
+    {
+      "name": "password only",
+      "content": "hunter2",
+      "parsed": {
+        "password": "hunter2",
+        "fields": [],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "password only with newline",
+      "content": "hunter2\n",
+      "parsed": {
+        "password": "hunter2",
+        "fields": [],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "empty password, fields",
+      "content": "\nusername: ned\nurl: https://example.com\n",
+      "parsed": {
+        "password": "",
+        "fields": [
+          {
+            "key": "username",
+            "value": "ned"
+          },
+          {
+            "key": "url",
+            "value": "https://example.com"
+          }
+        ],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "fields, otpauth, separator, notes",
+      "content": "pw\nusername: ned\notpauth://totp/x?secret=JBSWY3DP\n\nnote line 1\nnote: not a field\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "username",
+            "value": "ned"
+          }
+        ],
+        "otpauth": [
+          "otpauth://totp/x?secret=JBSWY3DP"
+        ],
+        "notes": "note line 1\nnote: not a field\n"
+      }
+    },
+    {
+      "name": "notes without separator",
+      "content": "pw\nusername: ned\nhttps://example.com is a URL, not a field\nmore\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "username",
+            "value": "ned"
+          }
+        ],
+        "otpauth": [],
+        "notes": "https://example.com is a URL, not a field\nmore\n"
+      }
+    },
+    {
+      "name": "repeated keys and empty value",
+      "content": "pw\nurl: https://a.example\nurl: https://b.example\ncomment:\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "url",
+            "value": "https://a.example"
+          },
+          {
+            "key": "url",
+            "value": "https://b.example"
+          },
+          {
+            "key": "comment",
+            "value": ""
+          }
+        ],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "block field",
+      "content": "pw\nprivate-key: |\n  -----BEGIN KEY-----\n  abc\n  -----END KEY-----\nusername: ned\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "private-key",
+            "value": "-----BEGIN KEY-----\nabc\n-----END KEY-----"
+          },
+          {
+            "key": "username",
+            "value": "ned"
+          }
+        ],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "pipe value without block",
+      "content": "pw\nweird: |\n\nnotes\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "weird",
+            "value": "|"
+          }
+        ],
+        "otpauth": [],
+        "notes": "notes\n"
+      }
+    },
+    {
+      "name": "spaces kept in value",
+      "content": "pw\nkey:   spaced value  \n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "key",
+            "value": "  spaced value  "
+          }
+        ],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "key with spaces",
+      "content": "pw\nSecurity question: first pet\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "Security question",
+            "value": "first pet"
+          }
+        ],
+        "otpauth": [],
+        "notes": null
+      }
+    },
+    {
+      "name": "leading whitespace ends fields",
+      "content": "pw\n indented: no\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [],
+        "otpauth": [],
+        "notes": " indented: no\n"
+      }
+    },
+    {
+      "name": "CRLF",
+      "content": "pw\r\nusername: ned\r\n\r\nnotes\r\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [
+          {
+            "key": "username",
+            "value": "ned"
+          }
+        ],
+        "otpauth": [],
+        "notes": "notes\r\n"
+      }
+    },
+    {
+      "name": "blank line then fields-looking notes",
+      "content": "pw\n\nusername: in notes\n",
+      "parsed": {
+        "password": "pw",
+        "fields": [],
+        "otpauth": [],
+        "notes": "username: in notes\n"
+      }
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "description": "Password wrap: AEAD(AUK, nonce, VK, \"vlt/v1/pw-wrap\" || vault_id || u32 epoch || kdf_block). Device wrap: DWK = HKDF(X25519(eph_sk, device_pk), salt = eph_pk || device_pk, info = \"vlt/v1/device-wrap\"); AEAD(DWK, nonce, VK, \"vlt/v1/device-wrap\" || vault_id || u32 epoch || device_id).",
+  "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+  "epoch": 2,
+  "vk": "73c92df917bd24579d72aa3be17e65842fdc72418b8d8eec873e716809878a15",
+  "password_wrap": {
+    "auk": "c888995497e3fa6e204c10df5df32f8c630b801f144f82d37e97323171214224",
+    "kdf_block": "01000000400000000100000001657bec8a77e55d88c5d8e43b23aa75ed",
+    "ad": "766c742f76312f70772d777261707f9c67544c9db6e3ee2a2d77fd1e1be30000000201000000400000000100000001657bec8a77e55d88c5d8e43b23aa75ed",
+    "nonce": "331d20e96f38bcd5e2f4d0c573388974a63ba8293b799a58",
+    "ct": "449f8e361cdc16fa4fc9b01134c80428254964bce5c26ab791a4d70136b43509bb0554fb1eba8f83667c73276b1bbff8"
+  },
+  "device_wraps": [
+    {
+      "device_id": "2d279757a0e3cd231ea32cbb4a06a22e",
+      "device_sk": "4194637641a8f1795f92c81dc5a01aedd26c4b6cbae0d69bc145267485b6de86",
+      "device_pk": "fd5c24e7f2e8e4d9ed781d38cc7f9200b4584deda9a82c844f142f62263cf447",
+      "eph_sk": "f0a5486f833e3197ec263a2ed4debcd2978a9f1a9893334469ddc5482c2ebdd7",
+      "eph_pk": "bc742bf3e1a59bdded515425b34928bf7626d5f6456d9accd5c9fa52e47b115d",
+      "shared_secret": "bf6c9e21307a4219561dc40e3d754cc686b009c413defd43bccd94e76542f44e",
+      "dwk": "0a7d16ae02b204da23702104e3ad15455242d328847a1159beb8c463f6bd8d9a",
+      "nonce": "3244f2afd680972416802a3e3743c27e972985bc8b4efaea",
+      "ct": "895e69077a9e784504c883a2b375fe75b29d81dc797952705b5cd7af3ae27fc76e3d6e98961fa6403742a7d54e6efcc9"
+    },
+    {
+      "device_id": "5dec0c2b18b567ae95c8cf3b9fa4a3ea",
+      "device_sk": "9a80c52a7662081aa6cda10d5c1bd1bd4799cc61e9e7494eb187f571ce3437ea",
+      "device_pk": "d3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd46",
+      "eph_sk": "f47e3899320d289404ceb5bc5b0dfbc56eea3e29649a73bb1c704d2ba37395dd",
+      "eph_pk": "f27c990db1c3c9b43caca4f4b1edcb0cfd465d3dcc76aea7bd2cc80ddc20b25e",
+      "shared_secret": "4566d723e1a4f20794194354fc04d7c743973e63720a894af368ec6cf271b444",
+      "dwk": "16facd078d2e34ed2b58e75b64adad1d4c7060fd9adea7f498d3f28e83c10910",
+      "nonce": "2de0d8cf7ae16fa1e274ad6c8069a1ffeb45df4e1c65c2db",
+      "ct": "7f900728f3cb0bbb236d46a98335bcebc32f9d771f49bd225e6f44a0c2ba48f6f100bfb379bb982c359a4cb1824cae27"
+    }
+  ],
+  "low_order_point": {
+    "device_pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "note": "X25519 with this public key yields an all-zero shared secret; the wrap must be rejected"
+  }
+}

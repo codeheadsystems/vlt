@@ -1,0 +1,73 @@
+{
+  "description": "pw_key = Argon2id(NFKC(password), kdf_salt, m, t, p, 32); AUK = HKDF-SHA256(pw_key || secret_key, salt = vault_id, info = \"vlt/v1/auk\").",
+  "cases": [
+    {
+      "name": "test parameters, non-NFKC password",
+      "password_utf8": "636f727265637420686f72736520efac81206261747465727920e285ab",
+      "password_nfkc_utf8": "636f727265637420686f727365206669206261747465727920584949",
+      "secret_key": "3f626ae58f2d93ebcfb291c85cffcf5b",
+      "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+      "kdf": {
+        "alg": 1,
+        "m_kib": 64,
+        "t": 1,
+        "p": 1,
+        "kdf_salt": "657bec8a77e55d88c5d8e43b23aa75ed"
+      },
+      "kdf_block": "01000000400000000100000001657bec8a77e55d88c5d8e43b23aa75ed",
+      "pw_key": "b33171e9bc0d8b47ade97c94eda81a279c2e9bb35f5262154226d944263cc282",
+      "auk": "c888995497e3fa6e204c10df5df32f8c630b801f144f82d37e97323171214224"
+    },
+    {
+      "name": "floor parameters, non-NFKC password",
+      "password_utf8": "636f727265637420686f72736520efac81206261747465727920e285ab",
+      "password_nfkc_utf8": "636f727265637420686f727365206669206261747465727920584949",
+      "secret_key": "3f626ae58f2d93ebcfb291c85cffcf5b",
+      "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+      "kdf": {
+        "alg": 1,
+        "m_kib": 65536,
+        "t": 3,
+        "p": 1,
+        "kdf_salt": "657bec8a77e55d88c5d8e43b23aa75ed"
+      },
+      "kdf_block": "01000100000000000300000001657bec8a77e55d88c5d8e43b23aa75ed",
+      "pw_key": "df5d3ac803ab27fc7c12c53ac1f9c1f89ddfe786a76346936ba4ce6111a881c1",
+      "auk": "ae741243579cbedea4b31c11e015f78bc6019d816501c8b43cc9d6dc04d48f2b"
+    },
+    {
+      "name": "test parameters, ASCII password",
+      "password_utf8": "68756e746572322d68756e74657232",
+      "password_nfkc_utf8": "68756e746572322d68756e74657232",
+      "secret_key": "3f626ae58f2d93ebcfb291c85cffcf5b",
+      "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+      "kdf": {
+        "alg": 1,
+        "m_kib": 64,
+        "t": 1,
+        "p": 1,
+        "kdf_salt": "657bec8a77e55d88c5d8e43b23aa75ed"
+      },
+      "kdf_block": "01000000400000000100000001657bec8a77e55d88c5d8e43b23aa75ed",
+      "pw_key": "d9a986311468ed220377984198070051b45a61989a1ae96774bd4d73708c1bbb",
+      "auk": "84b3be947eb7592a58718b9943cb2b1763bfc05d91066a832f68bec76fa6da52"
+    }
+  ],
+  "parameter_bounds": {
+    "floor": {
+      "m_kib": 65536,
+      "t": 3,
+      "p": 1
+    },
+    "ceiling": {
+      "m_kib": 4194304,
+      "t": 64,
+      "p": 16
+    },
+    "test": {
+      "m_kib": 64,
+      "t": 1,
+      "p": 1
+    }
+  }
+}

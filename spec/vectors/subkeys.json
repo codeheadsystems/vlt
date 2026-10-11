@@ -1,0 +1,30 @@
+{
+  "description": "K_purpose = HKDF-SHA256(VK, salt = vault_id, info = \"vlt/v1/\" || purpose).",
+  "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+  "cases": [
+    {
+      "epoch": 1,
+      "vk": "fe87f69fa2f4da9b4450bd0e4fb111c29f7425e3369f0159b941d2af4dc1aab7",
+      "subkeys": {
+        "header-mac": "d8d1c8c5445401247ab4df70a152cea8da3f7e6721caa6d4e0ebca4f63563791",
+        "meta": "3aee0bdf45bfadab32448288d48b4d5fb5390c451193382adb349de3b2f9c532",
+        "index": "e6cd20d7471c3de21764e61d72d682d735a8f786a6807ed595ad33d3e57cb1fd",
+        "entry": "f74587c6762c639d3f561b5df139a3537caa0521247889f209351b46ed83f192",
+        "mirror": "962c8d9f3d51f300c0d817bd2c992480d2b36b032f3fc3ec8e566d7747e38eab",
+        "fingerprint": "e20169283fa8e8bfdf35f152eb0175b78efa246cff2faf8e9a978c867289688d"
+      }
+    },
+    {
+      "epoch": 2,
+      "vk": "73c92df917bd24579d72aa3be17e65842fdc72418b8d8eec873e716809878a15",
+      "subkeys": {
+        "header-mac": "eadec4ea42e570e2fe12f832ea55bf4831b85bb9b28b4a86098f3f748520eda1",
+        "meta": "611b8457ebcac46f98718fdfb2e4dff8806be96db150bb2c9447119e8525641a",
+        "index": "c8c5b5bb42c53c7da0f875377d2e3908edbea081f421bacd510e47f2462c82d1",
+        "entry": "2e6c45b247fb5fd90c063d5265dabd67471fd11f25667ac008178504f1332c39",
+        "mirror": "7cde512218007db599a1da553d6bacf5af47ca406cc5444149f84b4e11858010",
+        "fingerprint": "f7e918037f3d67cd0d3a8dc3e486ebb341f6dea674ce2ad28d0128605d6ae858"
+      }
+    }
+  ]
+}

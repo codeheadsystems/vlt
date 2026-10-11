@@ -1,0 +1,16 @@
+{
+  "description": "Enrollment code shown by the new device, the comparison code both devices display (crock(SHA-256(\"vlt/v1/enroll-compare\" || code)[0..10]) in groups of four), and the return code the approver shows (epoch and crock(fingerprint[0..10])).",
+  "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
+  "device_id": "5dec0c2b18b567ae95c8cf3b9fa4a3ea",
+  "kind": 2,
+  "label": "pixel",
+  "device_pk": "d3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd46",
+  "enrollment_code": "vlt-enroll:1:7f9c67544c9db6e3ee2a2d77fd1e1be3:5dec0c2b18b567ae95c8cf3b9fa4a3ea:2:pixel:00BtlbufDyk648psWNjh8CUgtDOnWIFnfyR3UuR5vUY",
+  "comparison_code": "3EG5-9D0V-X92V-BKSE",
+  "approver": {
+    "epoch": 2,
+    "vk": "73c92df917bd24579d72aa3be17e65842fdc72418b8d8eec873e716809878a15",
+    "fingerprint": "f7e918037f3d67cd0d3a8dc3e486ebb341f6dea674ce2ad28d0128605d6ae858"
+  },
+  "return_code": "vlt-approved:1:2:YZMHG0VZ7NKWT39T"
+}

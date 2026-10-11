@@ -26,7 +26,7 @@ The trigger is lock-in risk: Bitwarden works today, but its free tier is not gua
 
 ## Threat model
 
-The bucket is treated as hostile: anything that can read it must learn nothing beyond object counts, sizes and timestamps. The AWS access keys live on every device, so a lost phone or laptop is the most likely way the ciphertext leaks, and the design must hold up to offline brute force when it does.
+The bucket is treated as hostile: anything that can read it must learn nothing beyond object counts, sizes, timestamps, the number of enrolled devices and a few plaintext write counters. The AWS access keys live on every device, so a lost phone or laptop is the most likely way the ciphertext leaks, and the design must hold up to offline brute force when it does.
 
 | Adversary | Can do | Must not be able to |
 | --- | --- | --- |

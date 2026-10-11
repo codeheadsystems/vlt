@@ -78,7 +78,9 @@ need to write one stops with an integrity error that names `vlt repair --rekey`.
 comes near the cap, so reaching it means a holder of the vault key forged a counter; the cap keeps
 arithmetic safe, and [rekey](#rekey) is the recovery, because it starts a new lineage whose
 counters begin again at 1. A device also reports in the status line, with the writer, any accepted
-header or index whose `header_seq` or `index_seq` advances more than 2^32 past its pin. A header
+header or index whose `header_seq` or `index_seq` advances more than 2^32 past its pin, and every
+epoch change, as "the vault key was changed by <writer>". Honest epoch changes follow a revocation
+or a password change, so a run of them is visible. A header
 whose epoch advances more than 16 past the pinned epoch is rejected: honest rotations each need a
 user action, and a device that missed more than 16 of them re-enrolls.
 
@@ -1418,6 +1420,7 @@ confirmation.
 | Rotation pending that does not clear | Republish the committed rotation index (found by its SHA-256 in a mirror or among the bucket's index versions), re-sealed under the current epoch, and list every head the unknown index adds as an orphan the user can re-add. Accepting the unknown index itself needs `--force` and a warning |
 | Header overwritten or corrupt (unversioned backend) | Re-`PUT` the mirrored header bytes with `If-Match`; equal `header_seq` and identical bytes satisfy every pin |
 | Head entry object fails authentication or its hash (overwritten on an unversioned backend) | Take the good copy from the mirror, write its content as a new revision with a fresh `object_id` whose parent is the damaged object's parent, and point the index at it. History behind the damaged object survives only where a mirror or S3 version holds it |
+| History object fails its hash (overwritten on an unversioned backend) | Read it from any mirror whose copy matches the hash. A history object cannot be rewritten, because entry keys are write-once, so where no mirror holds it, `vlt log` and rekey end that chain there and list it |
 | A member forged the vault state: a password wrap that the correct password no longer opens, counters at the cap, or unknown devices that cannot be revoked normally | `--rekey`, below |
 
 ### Rekey
@@ -1427,7 +1430,9 @@ for the case where a holder of the vault key has written state that ordinary rev
 undo: a password wrap the correct password no longer opens, counters at the cap, an epoch at its
 limit, or devices that cannot be revoked normally. It starts a new **lineage**: a new `vault_id`
 with epoch 1 and counters at 1, carrying every earlier VK as a legacy lineage so that all existing
-entry objects stay readable. It runs on any device that can still read the vault:
+entry objects stay readable. It runs on any device with a mirror of the vault. It works from the
+mirror's last accepted header and index, which its own device key opens, so it still works when a
+member has written a current header that removes every device or that no device can open:
 
 1. Ask for the current master password and the secret key from the emergency kit, and check them
    against the last password wrap this device saw open (recorded at each [password
@@ -1439,19 +1444,27 @@ entry objects stay readable. It runs on any device that can still read the vault
 4. Walk every object reachable from the chosen index (each head and tombstone and its history
    chain, checking the hashes), and collect the `(vault_id, epoch)` pairs those objects use. Carry
    forward only the VKs of those pairs, each checked by opening one object that uses it. Filler
-   VKs, forged lineages, and objects that no chosen chain reaches are dropped, so a member cannot
-   fill the keyring or lineage limits to block a rekey. A chain whose objects cannot be fetched
-   stops the rekey with the list, unless `--drop-unreachable` accepts losing that history.
-5. Print the revocation commands for every IAM user under the vault's path except this device's,
+   VKs, forged lineages, and objects that no chosen chain reaches are dropped. The walk follows the
+   rules of `vlt log`: a parent that returns `404` is purged history and ends that chain normally,
+   and a parent that fails its hash ends the chain and is listed. Objects are read from the mirror
+   where a copy matches the hash. The walk shows progress and stops after 1,000,000 objects
+   (`--max-objects` changes the bound), listing the chains it did not finish.
+5. If the carried pairs exceed the keyring limit, plan to re-seal every reachable head object into
+   the new lineage in step 8 (a new revision with a fresh `object_id`, the same content, and the old
+   head as parent), and carry history VKs newest epoch first while they fit. Older history whose VK
+   does not fit is listed and becomes unreadable once the user confirms. A member who stuffs the
+   index with entries under many epochs can therefore cost history, but cannot block a rekey.
+6. Print the revocation commands for every IAM user under the vault's path except this device's,
    and wait until the user confirms they ran them. Until they do, any old device key can replay the
    old lineage to devices that have not re-enrolled.
-6. Generate a new `vault_id`, a new secret key, and `VK_1` of the new lineage. Build a header with
+7. Generate a new `vault_id`, a new secret key, and `VK_1` of the new lineage. Build a header with
    `header_seq = 1`, `epoch = 1`, an empty keyring, the carried VKs grouped into legacy lineages by
-   `vault_id`, a password wrap under the new password and secret key, and a
-   device record for this device only. Write it over the old header with `If-Match`.
-7. Publish the chosen index re-sealed under the new lineage, with `index_seq = 1` and an empty
-   `applied` table. Move this device's mirror to the new `vault_id` directory.
-8. Print the new emergency kit, whose vault configuration line carries the new `vault_id`, and run
+   `vault_id`, a password wrap under the new password and secret key, and a device record for this
+   device only. Write it over the old header with `If-Match`.
+8. Write any re-sealed heads from step 5 with `If-None-Match: *`, then publish the chosen index,
+   pointing at them, re-sealed under the new lineage, with `index_seq = 1` and an empty `applied`
+   table. Move this device's mirror to the new `vault_id` directory.
+9. Print the new emergency kit, whose vault configuration line carries the new `vault_id`, and run
    the [kit confirmation](#kit-confirmation). Say that pending invites are void and that encrypted
    exports made before now need the old kit.
 
@@ -1459,8 +1472,9 @@ Every other device then fails to unlock, because the header's `vault_id` no long
 and reports that the vault was rekeyed or tampered with. The user re-enrolls each device through an
 invite or the kit path, which sets fresh pins. The device keeps its old mirror for history, and if
 the old mirror's `state` holds unpublished operations, `vlt enroll` offers to replay them, re-sealed
-as in publishing step 1. The old `state` opens with the old lineage's `K_mirror`, which the legacy
-keyring provides.
+as in publishing step 1. The old `state` opens with the `K_mirror` of its own epoch: the device
+opens the old mirror's last accepted header with its device private key to recover that VK, so the
+replay does not depend on which VKs the rekey carried.
 
 A member cannot fake a rekey that any device accepts. A header with a new `vault_id` passes no
 existing pin, and the kit path needs a password wrap that only the password and the new secret key

@@ -81,7 +81,7 @@ The requirements document holds the full threat model. The properties this spec 
 | --- | --- |
 | Reader of the bucket, including all versions | Learns object count, sizes rounded to 512 bytes (entries) or 4,096 bytes (index), timestamps, the number of enrolled devices, and the plaintext counters `epoch`, `header_seq`, and `index_seq`. Learns no path, URL, username, secret, or device label |
 | Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On single-disk RustFS, which cannot version, the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost |
-| Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it. While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
+| Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it, provided the secret key was rotated or the master password resists offline guessing (the holder knows the old secret key). While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
 | Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. `vlt passwd --rotate` also rotates the vault key, which cuts this off for content written afterwards |
 | Holder of a powered-off device | Needs the master password (no-keyring CLI), the OS login (keyring CLI), or the device biometric (Android) to unlock |
 
@@ -243,7 +243,7 @@ derivation time on the current device is at most 500 ms. If 64 MiB already takes
 the floor. The 256 MiB cap keeps password unlock possible on a phone or in a browser. The
 requirement targets the slowest enrolled device, so `vlt passwd --recalibrate` is best run on the
 slowest device; `vlt enroll` reports the measured password-unlock time on the new device and
-suggests recalibration above 2 s.
+suggests recalibration when it exceeds 500 ms.
 
 Password unlock is the slow path. Day-to-day unlock goes through the device wrap and takes no
 Argon2 work, which keeps per-device unlock under 100 ms.
@@ -271,10 +271,18 @@ example attachments, CORE-9, or passkeys, CORE-14) without a vault-wide format c
 | `count` | `u16` | At most 64 |
 | items | `u16 type`, `bytes32 value` | Sorted by `type`, no duplicates |
 
-Bit 15 of `type` marks an item as critical. A reader rejects a structure that holds a critical item
-of a type it does not know, and ignores a non-critical one. A writer that rewrites a record it did
-not otherwise change (for example, carrying an index entry over during merge) keeps its extension
-items byte for byte. Format version 1 defines no extension types, so version 1 writers emit
+Two bits of `type` carry rules that every reader applies to types it does not know:
+
+| Bit | Name | Meaning for an unknown type |
+| --- | --- | --- |
+| 15 | critical | Set: reject the structure. Clear: ignore the item when reading |
+| 14 | copy-safe | Set: keep the item when the writer changes other fields of the record. Clear: drop the item when the writer changes the record |
+
+A writer that rewrites a record without changing it (for example, carrying an index entry over
+during merge) keeps every extension item byte for byte, whatever the bits. A writer that changes a
+record keeps unknown items with bit 14 set and drops unknown items with bit 14 clear. An edit to an
+entry's content is a change to the entry plaintext record; a new head for an index entry is a change
+to that index record. Format version 1 defines no extension types, so version 1 writers emit
 `count = 0`.
 
 ## Size limits
@@ -342,7 +350,7 @@ Metadata plaintext, sealed as
 | `secret_key` | `b16` | The current secret key |
 | `rotated_from_epoch` | `u32` | Epoch the last rotation left, or `0` if the vault never rotated |
 | `rotated_from_index_seq` | `u64` | `index_seq` of the index the rotation started from, or `0` |
-| `rotated_from_index_sha256` | `b32` | SHA-256 of that index object, or zeros |
+| `rotated_from_index_sha256` | `b32` | SHA-256 of that index object, or zeros. Carried forward unchanged until the next rotation; once a device has accepted a newer index, its `index_seq` pin makes the commitment irrelevant to it |
 | `keyring_count` | `u32` | |
 | keyring entries | `u32 epoch`, `b32 vk` | Every earlier epoch, ascending |
 | `device_info_count` | `u16` | Equals `device_count` |
@@ -391,8 +399,9 @@ First-unlock trust depends on how the device obtains the VK:
 | Password and secret key (kit path, `vlt init`) | The password wrap. Only an AUK holder can produce it. `vault_id` must equal the kit's |
 | Device wrap after `vlt enroll approve` | The enrollment return code, which carries the approver's `epoch` and 80 bits of its fingerprint. The new device sets its pins from the code and accepts only a header that satisfies them |
 
-A fresh device cannot detect an index rollback that happened before it enrolled; its index pins
-start from the first index it accepts.
+A return-code pin holds an 80-bit fingerprint prefix; the first header accepted against it replaces
+it with the full fingerprint. A fresh device cannot detect an index rollback that happened before it
+enrolled; its index pins start from the first index it accepts.
 
 ## Entry object
 
@@ -456,8 +465,9 @@ shown and exported as-is and has no fields.
 - Keys compare case-insensitively. A key may repeat; order is kept.
 
 A notes line that looks like a field and sits directly under the field section is parsed as a field.
-vlt always writes a blank separator line before notes, and `vlt insert -m` and `vlt edit` warn when
-the parsed fields change in a way the user may not intend.
+vlt always writes a blank separator line before notes. `vlt insert -m` and `vlt edit` warn when the
+saved content has notes that are not preceded by an empty separator line, because a later line
+added to the end of the field section would then change how the notes parse.
 
 Keys with meaning to vlt: `username` (also `user`, `login`), `url`, `email`, `type`, `password`
 (block form, for passwords containing a newline), `totp`, and the first `otpauth://` line (CORE-5).
@@ -492,7 +502,8 @@ Index plaintext:
 | `ext` | `ext` | |
 | padding | zero bytes | Whole object the smallest multiple of 4,096 bytes that holds it |
 
-`device_id` in an index entry is the writer of the head revision.
+`device_id` in an index entry is the writer of the head revision. A `head_object_id` appears at most
+once among the entries; a decoder rejects duplicates, because replay locates entries by head ID.
 
 Paths are UTF-8, normalised to NFC on input, `/`-separated, at most 1,024 bytes, with no empty
 segment, no `.` or `..` segment, no leading or trailing `/`, and no control characters.
@@ -559,6 +570,12 @@ starting at 1 and never reused. The index's `applied` table records, per device,
 for this device, and publishing sets the table's value to the highest `op_seq` replayed. A publish
 whose response was lost is therefore harmless to retry.
 
+The counter must never go backwards, or the device's new operations would be skipped. A device
+therefore initialises its next `op_seq` to `applied[device_id] + 1` whenever it builds a mirror, and
+on every accepted index whose `applied[device_id]` is at least its next `op_seq` (a restored or
+stale `state`), it raises the counter past it, renumbers its queued operations above it, and reports
+the event.
+
 | Operation | Fields |
 | --- | --- |
 | `put` | `op_seq`, `path`, `object_id`, `revision`, `parent_object_id` (zero for a new entry), `device_id` |
@@ -598,7 +615,8 @@ Let `remote` be the freshly fetched index. Each queued operation applies to `rem
 | `remove` | No target | Drop (the entry was edited since; edit wins over delete); report it |
 | `move` | Target found, `to` free | Move |
 | `move` | Target found, `to` taken | Move to a conflict path derived from `to`, labelled with this device |
-| `move` | No target, `from` holds an entry | Move whatever is at `from`: the rename is the user's intent, the content is the newer one |
+| `move` | No target, `from` holds a head that descends from `expected_head` | Move it: the rename is the user's intent, the content is the newer one |
+| `move` | No target, `from` holds an unrelated entry | Drop; report it |
 | `move` | No target, `from` empty | Drop; report it |
 
 "Descends from the parent" is decided by walking the remote head's chain back while its revision is
@@ -627,7 +645,7 @@ in `GET` requests, which breaks the cost requirement, so vlt syncs at these poin
 
 | Trigger | What runs |
 | --- | --- |
-| A CLI command served by the agent | The agent answers from the mirror at once, then syncs in the background if the last sync is older than 10 s. A write is queued and published in the background |
+| A CLI command served by the agent | The agent answers from the mirror at once, then syncs in the background if the last sync is older than 10 s. A write command exits 0 once the write is queued; the agent publishes it in the background, and `--wait` makes the command wait for publication (and fail with its exit code) |
 | A CLI command with no agent | One sync before the command, with a 3 s network budget; on timeout the command uses the mirror. A write command publishes before exiting |
 | The agent, while unlocked | One sync every 60 s (configurable, minimum 10 s). A locked agent does not poll |
 | `vlt sync` | One sync, a conditional `GET` of the header as well, and publication of the write queue, all in the foreground |
@@ -681,10 +699,11 @@ each client and is not part of the interchange format. The state is written to a
 
 Publishing the queue:
 
-1. For each queued entry object sealed under an epoch older than the header's, re-seal its plaintext
-   under the current epoch with a fresh `object_id`, and update the queued operation (and any later
-   operation that names the old ID as a parent). The old object may already be in the bucket; it
-   stays unreferenced.
+1. In queue order, re-seal every queued entry object that was sealed under an epoch older than the
+   header's, or whose `parent_object_id` names an object re-sealed in this step: new plaintext with
+   the updated parent, current epoch, fresh `object_id`. Rewrite every later operation's
+   `parent_object_id` and `expected_head` that names an old ID. Old objects may already be in the
+   bucket; they stay unreferenced.
 2. `PUT` each queued entry object with `If-None-Match: *`. On `412`, `GET` the object and require
    identical bytes; anything else is an integrity error.
 3. Fetch the index (unconditional on retry), check pins, replay the queued operations, set
@@ -711,12 +730,11 @@ current index, except history objects it has already read.
    credentials](#device-credentials-and-iam-policy)). `vlt init --print-setup` prints this without
    starting the rest.
 3. Read the device's access key from a prompt or from the standard `AWS_*` variables.
-4. Run the [capability probe](#capability-probe).
-5. Prompt for the master password twice, calibrate the KDF, and generate the secret key, `VK_1`,
-   the header, and an empty index.
-6. Write the header and the index as part of the probe.
-7. Store the device secret bundle, set the pins, and start the agent.
-8. Print the emergency kit, only now that the header write has succeeded.
+4. Prompt for the master password twice, calibrate the KDF, and generate the secret key, `VK_1`,
+   the header, and an empty index. Nothing has been written yet.
+5. Run the [capability probe](#capability-probe), which writes the header and the index.
+6. Store the device secret bundle, set the pins, and start the agent.
+7. Print the emergency kit, only now that the header write has succeeded.
 
 ## Capability probe
 
@@ -727,7 +745,9 @@ cannot delete.
 1. `GetBucketVersioning`, `GetObjectLockConfiguration`, and `GetBucketLifecycleConfiguration`.
    Apply the table below; a refusal stops here, with nothing written.
 2. `ListObjectVersions` on the bucket root with `max-keys=1`. Refuse if it returns any object
-   version or delete marker, inside or outside the prefix: vault and bucket are one-to-one.
+   version or delete marker, inside or outside the prefix: vault and bucket are one-to-one. A
+   backend that does not implement `ListObjectVersions` (an unversioned RustFS) gets
+   `ListObjectsV2` with the same rule.
 3. `PUT <prefix>header` with `If-None-Match: *`. Expect `200`.
 4. `PUT <prefix>header` again, same bytes, `If-None-Match: *`. Expect `412`.
 5. `PUT <prefix>header`, same bytes, `If-Match: "00000000000000000000000000000000"`. Expect `412`.
@@ -904,11 +924,14 @@ device the VK.
    revoked device can still read every object and can still write.
 2. Prompt for the master password (needed to rebuild the password wrap) and confirm it by opening
    the current password wrap.
-3. With `--rotate-secret-key`, generate a new secret key; otherwise keep the current one. The
-   revoked device has read the current secret key from the metadata, so after a theft rotating it
-   means the thief needs more than the master password to open any later password wrap. Rotating it
-   makes the printed emergency kit and older encrypted exports' secret key stale, so it is opt-in
-   and vlt prints a new kit at the end.
+3. Ask whether the device was lost or stolen (`--lost` or `--retired` skip the question). For a lost
+   or stolen device, generate a new secret key; for a retired one, keep it (`--rotate-secret-key`
+   and `--keep-secret-key` override). The revoked device has read the current secret key from the
+   metadata, and a no-keyring device file can be brute-forced offline at the KDF floor, so after a
+   theft only a new secret key keeps the thief from opening later password wraps with a recovered
+   password. A new secret key makes the printed emergency kit and older encrypted exports' key
+   stale; vlt prints a new kit at the end.
+   If the master password is forgotten, run `vlt passwd --forgotten` first; revocation needs it.
 4. Fetch the index (epoch `e`) and note its `index_seq` and SHA-256.
 5. Generate `VK_{e+1}`. Build the header: `epoch = e + 1`; metadata with the secret key, the
    keyring plus `(e, VK_e)`, `rotated_from_epoch = e` and the index's `index_seq` and SHA-256, and
@@ -926,10 +949,14 @@ Between steps 5 and 6 the bucket holds a header at epoch `e + 1` and the rotatio
 replays its queue on it and seals the result under epoch `e + 1`, which completes the rotation. A
 crash between the steps therefore self-heals on the next write from any device.
 
+A `412` on the header write in step 5 restarts from step 4. In step 6, a refetched index already at
+epoch `e + 1` means another client completed the rotation, and the rotating device stops there.
+
 If another device published an epoch-`e` index between steps 4 and 5, the bucket's index no longer
-matches the commitment. Other clients refuse it and wait, reading from their mirrors; the rotating
-device finishes in step 6. If the rotating device never returns, `vlt repair` on any device accepts
-that index after the user confirms.
+matches the commitment. Other clients report **rotation pending** (a status, not an integrity
+error), serve reads from their mirrors, and keep writes queued; the rotating device finishes in
+step 6. A holder of `VK_e` with write access can also create this state on purpose, so the repair
+for it never trusts the unknown index by default (see [Repair](#repair)).
 
 Each remaining device verifies the rotation through the keyring check in its header pin. A device
 whose wrap was removed fails to unlock and reports that it has been revoked.
@@ -1000,7 +1027,8 @@ shows what it will publish and asks for confirmation.
 | Problem | Repair |
 | --- | --- |
 | Index rollback, fork, or corruption | Publish the device's mirrored index with `index_seq` set to the larger of the remote and pinned values plus one. `--from-version` instead lists the bucket's index versions (where the backend versions objects), shows each valid one's `index_seq` and entry count, and republishes the chosen one the same way |
-| Stale rotation index | Accept the bucket's epoch-`e` index, after checking it against this device's pins, and re-seal it under the current epoch |
+| Rotation pending that does not clear | Republish the committed rotation index (found by its SHA-256 in a mirror or among the bucket's index versions), re-sealed under the current epoch, and list every head the unknown index adds as an orphan the user can re-add. Accepting the unknown index itself needs `--force` and a warning |
+| Header overwritten or corrupt (unversioned backend) | Re-`PUT` the mirrored header bytes with `If-Match`; equal `header_seq` and identical bytes satisfy every pin |
 | Head entry object fails authentication (overwritten on an unversioned backend) | Take the good copy from the mirror, write its content as a new revision with a fresh `object_id` whose parent is the damaged object's parent, and point the index at it. History behind the damaged object survives only where a mirror or S3 version holds it |
 
 ## Agent protocol
@@ -1042,9 +1070,9 @@ it supports, and the client restarts the agent if the binaries differ.
 | `log` | `path`, `deleted` | Revisions |
 | `passwd` | `password`, `new_password`, `forgotten`, `rotate`, `recalibrate` | Nothing |
 | `enroll_approve` | `code` | Return code |
-| `revoke` | `label`, `password`, `rotate_secret_key` | New emergency kit, if any |
+| `revoke` | `label`, `password`, `lost`, `rotate_secret_key` | New emergency kit, if any |
 | `kit` | `password` | Emergency kit text |
-| `export` | `password`, `format`, options | Export bytes (base64) |
+| `export` | `password`, `format`, options | A stream of `chunk` responses (base64, at most 1 MiB each) sharing the request `id`, ended by one with `"done": true` |
 
 `vlt edit` is `show` followed by `put` with `expected_head`; `vlt generate` and `vlt insert` are
 `put`. Password generation runs in the CLI process.
@@ -1053,7 +1081,7 @@ The Firefox native-messaging host (phase 4) is a client of the same protocol.
 
 ## Emergency kit and recovery
 
-`vlt init`, `vlt revoke --rotate-secret-key`, and `vlt kit` print the **emergency kit** to standard
+`vlt init`, `vlt kit`, and any `vlt revoke` that rotates the secret key print the **emergency kit** to standard
 output, formatted for a printer. It is not written to disk unless `--output <file>` is given, which
 warns.
 
@@ -1088,7 +1116,10 @@ What each loss costs:
 ## Encrypted export format
 
 `vlt export --encrypted <file>` writes one self-contained file. It opens with `vlt import --backup`
-and the master password plus the secret key, on any machine, with no bucket.
+and the master password plus the secret key, on any machine, with no bucket. The requirements
+describe the backup as opening with the master password; the secret key is added by default so the
+file resists offline guessing as well as the vault does, and `--password-only` gives the
+requirement's literal form.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -1196,6 +1227,7 @@ built-in properties are omitted; custom fields are always written, even with an 
 | `fields[i]`, text or hidden | `<name>: <value>` |
 | `fields[i]`, boolean | `<name>: true` or `<name>: false` |
 | `fields[i]`, hidden | Also `bw-hidden: <name>` |
+| `fields[i]`, boolean | Also `bw-boolean: <name>` |
 | `fields[i]`, linked | `bw-linked: <name> -> <linked property name>` |
 | `favorite: true` | `bw-favorite: true` |
 | `reprompt: 1` | `bw-reprompt: true` |

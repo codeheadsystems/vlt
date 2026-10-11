@@ -26,7 +26,7 @@ Setup takes about ten minutes: point it at a bucket in your AWS account or at yo
 
 **What if my phone is stolen?** The thief gets the phone's AWS key and an encrypted local copy. Unlocking still needs your fingerprint or master password plus the vault's secret key. Delete the phone's AWS key with the IAM commands `vlt` prints (vlt never holds admin credentials), then revoke its enrollment from any other device, and the vault key rotates.
 
-**What if I forget my master password?** There is no reset; that is the point of zero-knowledge. Any still-enrolled device can set a new one. The emergency kit plus an enrolled device also works. Losing every device and the password means losing the vault, so keep an encrypted export offline.
+**What if I forget my master password?** There is no reset; that is the point of zero-knowledge. Any still-enrolled device that unlocks without it (a phone with a fingerprint, or a computer with an OS keyring) can set a new one. The emergency kit plus an enrolled device also works. Losing every device and the password means losing the vault, so keep an encrypted export offline.
 
 **How much does it cost?** S3 storage and requests for a personal vault come to cents per year at current S3 prices. There is no subscription, and a self-hosted RustFS server costs nothing beyond your own hardware.
 
@@ -38,7 +38,7 @@ Setup takes about ten minutes: point it at a bucket in your AWS account or at yo
 
 **Can my partner or family share my vault?** No. vlt is a single-user password manager by design; there are no shared folders.
 
-**What happens when two devices edit at once?** Edits to different entries merge automatically. Two edits to the same entry keep the newest and save the other as a `.conflict` copy, so nothing is lost.
+**What happens when two devices edit at once?** Edits to different entries merge automatically. Two edits to the same entry keep the one further along its edit history and save the other as a `.conflict` copy, so nothing is lost.
 
 **Does it support TOTP codes and passkeys?** TOTP, yes, from an `otpauth://` line in the entry, like pass-otp. Passkey storage and unlocking with a hardware security key are planned for a later release.
 

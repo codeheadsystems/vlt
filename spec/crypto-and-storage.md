@@ -78,8 +78,9 @@ need to write one stops with an integrity error that names `vlt repair --rekey`.
 comes near the cap, so reaching it means a holder of the vault key forged a counter; the cap keeps
 arithmetic safe, and [rekey](#rekey) is the recovery, because it starts a new lineage whose
 counters begin again at 1. A device also reports in the status line, with the writer, any accepted
-header or index whose `header_seq` or `index_seq` advances more than 2^32 past its pin, or whose
-epoch advances more than 16 past its pin.
+header or index whose `header_seq` or `index_seq` advances more than 2^32 past its pin. A header
+whose epoch advances more than 16 past the pinned epoch is rejected: honest rotations each need a
+user action, and a device that missed more than 16 of them re-enrolls.
 
 Object IDs, device IDs, and the vault ID are 16 random bytes. Their text form is 32 lowercase hex
 characters.
@@ -91,7 +92,7 @@ The requirements document holds the full threat model. The properties this spec 
 | Adversary | Property |
 | --- | --- |
 | Reader of the bucket, including all versions | Learns object count, sizes rounded to 512 bytes (entries) or 4,096 bytes (index), timestamps, the number of enrolled devices, the number, times, and device IDs of enrollment requests (abandoned ones included), and the plaintext counters `epoch`, `header_seq`, and `index_seq`. Learns no path, URL, username, secret, or device label |
-| Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On single-disk RustFS, which cannot version, the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost |
+| Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On single-disk RustFS, which cannot version, the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost. Entry objects are hash-chained from the index, so an overwrite is detected even when the writer holds an old vault key, as a revoked device does |
 | Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it, provided the secret key was rotated or the master password resists offline guessing (the holder knows the old secret key). While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
 | Holder of the current VK before revocation (a thief who unlocks a stolen device) | Is a full member until revoked: it can write any header or index that every device accepts, including a changed password wrap, extra device records, a new VK, and counters at their caps. vlt bounds the damage rather than preventing it: every header and index names its writer, implausible counter jumps are reported, revocation lists devices the lost device enrolled or that appeared recently, a changed password wrap is reported as tampering, and `vlt repair --rekey` rebuilds the vault in a new lineage from the master password and the emergency kit, which no forged counter or password wrap can block |
 | Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. A password change that the user marks as an exposure (`vlt passwd` asks) also rotates the vault key, which cuts this off for content written afterwards |
@@ -441,6 +442,7 @@ A device stores a **header pin** in its local state:
 | `epoch` | Must be greater than or equal |
 | `fingerprint` of `VK_epoch` | If the epoch is equal, the fingerprint must be equal. If the epoch is greater, the keyring must contain the pinned epoch with a VK whose fingerprint matches the pin |
 | `header_seq` | Must be greater than or equal; equal requires a byte-identical header |
+| `legacy_sha256` | `SHA-256("vlt/v1/legacy" \|\| legacy block)`, where the legacy block is the metadata bytes from `legacy_count` through the last legacy lineage. Must be equal: the legacy lineages cannot change within a lineage. Only a [rekey](#rekey), which changes `vault_id` and passes no existing pin, writes a different list |
 
 The pins update after every accepted header. The keyring check gives each rotation a chain of
 custody: a device accepts a new VK only from a header that proves knowledge of the VK it already
@@ -451,7 +453,7 @@ First-unlock trust depends on how the device obtains the VK:
 | Path | Trust anchor |
 | --- | --- |
 | Password and secret key (kit path, `vlt init`) | The password wrap. Only an AUK holder can produce it. When the vault configuration line gives a `vault_id`, the header's must equal it |
-| Device wrap after an invite | The invite, which carries the inviting device's `vault_id`, `epoch`, and fingerprint. The new device sets its pins from the invite and accepts only a header that satisfies them |
+| Device wrap after an invite | The invite, which carries the inviting device's `vault_id`, `epoch`, fingerprint, and legacy pin. The new device sets its pins from the invite and accepts only a header that satisfies them |
 
 A fresh device cannot detect an index rollback that happened before it enrolled; its index pins
 start from the first index it accepts.
@@ -493,6 +495,7 @@ Entry plaintext:
 | --- | --- | --- |
 | `revision` | `u64` | `1` for a new entry, parent's revision plus one for an edit |
 | `parent_object_id` | `b16` | Previous revision, or 16 zero bytes for the first |
+| `parent_sha256` | `b32` | SHA-256 of the previous revision's whole entry object, or 32 zero bytes for the first |
 | `device_id` | `b16` | Device that wrote this revision |
 | `created_unix` | `i64` | Writer's wall clock, seconds. Display only, never used for ordering |
 | `content` | `bytes32` | Entry text, at most 1 MiB |
@@ -508,10 +511,15 @@ when `vault_id` is the header's (with `epoch` at most the header's), or a legacy
 metadata otherwise. Subkeys of a legacy lineage derive with that lineage's `vault_id` as the HKDF
 salt. Any other `(vault_id, epoch)` is rejected. The index's `vault_id` always equals the header's.
 
-When a client reads an entry through the index, it checks that the object's `object_id`, the key it
-was fetched from, and the index's head ID agree, and that `revision` and `device_id` equal the
-index's. When walking history, it checks that each parent's revision is exactly one less than its
-child's.
+When a client reads an entry through the index, it checks that the SHA-256 of the whole object
+equals the index's `head_sha256`, that the object's `object_id`, the key it was fetched from, and
+the index's head ID agree, and that `revision` and `device_id` equal the index's. When walking
+history, it checks that each parent object's SHA-256 equals the child's `parent_sha256` and that the
+parent's revision is exactly one less than its child's.
+
+The hashes chain every revision to the index, which only a holder of the current VK can write. An
+entry object that is overwritten, even with a valid ciphertext under an old or legacy key, no
+longer matches its hash and is rejected.
 
 ## Entry text format
 
@@ -566,9 +574,9 @@ Index plaintext:
 | --- | --- | --- |
 | `writer_device_id` | `b16` | The device that wrote this index; see [writer checks](#writer-checks) |
 | `entry_count` | `u32` | |
-| entries | `str16 path`, `b16 head_object_id`, `u64 revision`, `b16 device_id`, `ext` | Sorted by path bytes, paths unique |
+| entries | `str16 path`, `b16 head_object_id`, `b32 head_sha256`, `u64 revision`, `b16 device_id`, `ext` | Sorted by path bytes, paths unique. `head_sha256` is the SHA-256 of the whole head entry object |
 | `tombstone_count` | `u32` | |
-| tombstones | `str16 path`, `b16 head_object_id`, `u64 revision`, `b16 device_id`, `u64 removed_index_seq`, `ext` | Sorted by path bytes, then `removed_index_seq` |
+| tombstones | `str16 path`, `b16 head_object_id`, `b32 head_sha256`, `u64 revision`, `b16 device_id`, `u64 removed_index_seq`, `ext` | Sorted by path bytes, then `removed_index_seq` |
 | `applied_count` | `u16` | |
 | applied | `b16 device_id`, `u64 last_op_seq` | Sorted by `device_id`; see [replay](#index-operations-and-merge) |
 | `ext` | `ext` | |
@@ -582,8 +590,8 @@ segment, no `.` or `..` segment, no leading or trailing `/`, and no control char
 the index and of encrypted exports enforce these rules too, so a path that breaks them is rejected
 even when it arrives inside a valid ciphertext.
 
-Size at 5,000 entries: each entry costs 44 bytes plus its path. With a 40-byte average path that is
-84 bytes, so 5,000 entries take about 420 KB plus tombstones, under the 1 MB requirement. History
+Size at 5,000 entries: each entry costs 76 bytes plus its path. With a 40-byte average path that is
+116 bytes, so 5,000 entries take about 580 KB plus tombstones, under the 1 MB requirement. History
 lives in the entry objects, not in the index.
 
 ## Rollback detection
@@ -654,7 +662,7 @@ value at the cap leaves no room and is an integrity error that names `vlt repair
 
 | Operation | Fields |
 | --- | --- |
-| `put` | `op_seq`, `path`, `object_id`, `revision`, `parent_object_id` (zero for a new entry), `device_id` |
+| `put` | `op_seq`, `path`, `object_id`, `object_sha256`, `revision`, `parent_object_id` (zero for a new entry), `device_id` |
 | `remove` | `op_seq`, `path`, `expected_head` |
 | `move` | `op_seq`, `from`, `to`, `expected_head` |
 
@@ -815,8 +823,9 @@ Publishing the queue:
 
 1. In queue order, re-seal every queued entry object that was sealed under a `(vault_id, epoch)`
    other than the header's, or whose `parent_object_id` names an object re-sealed in this step: new
-   plaintext with the updated parent, current epoch, fresh `object_id`. Rewrite every later
-   operation's `parent_object_id` and `expected_head` that names an old ID. Old objects may already
+   plaintext with the updated parent and `parent_sha256`, current epoch, fresh `object_id`. Rewrite
+   every later operation's `parent_object_id`, `object_sha256`, and `expected_head` that names an
+   old object. Old objects may already
    be in the bucket; they stay unreferenced.
 2. `PUT` each queued entry object with `If-None-Match: *`. On `412`, `GET` the object and require
    identical bytes; anything else is an integrity error.
@@ -1208,6 +1217,7 @@ Invite, as text: `vlt-invite:1:` followed by base64url without padding of:
 | `device_id` | `b16` | The new device's ID |
 | `epoch` | `u32` | The inviting device's current epoch |
 | `fingerprint` | `b32` | Fingerprint of that epoch's VK |
+| `legacy_sha256` | `b32` | The inviting device's legacy pin |
 | `invite_secret` | `b32` | Random |
 | `label` | `str16` | The new device's label |
 | `endpoint` | `str16` | Empty for AWS |
@@ -1407,7 +1417,7 @@ confirmation.
 | Index rollback, fork, or corruption | Publish the device's mirrored index with `index_seq` set to the larger of the remote and pinned values plus one. Before publishing, compare the remote index (where it decrypts) with the mirrored one and list every head, tombstone, and `applied` advance present only in the remote one, each with its writer; the user chooses which to replay on top. `--from-version` instead lists the bucket's index versions (where the backend versions objects), shows each valid one's `index_seq`, writer, and entry count, and republishes the chosen one the same way |
 | Rotation pending that does not clear | Republish the committed rotation index (found by its SHA-256 in a mirror or among the bucket's index versions), re-sealed under the current epoch, and list every head the unknown index adds as an orphan the user can re-add. Accepting the unknown index itself needs `--force` and a warning |
 | Header overwritten or corrupt (unversioned backend) | Re-`PUT` the mirrored header bytes with `If-Match`; equal `header_seq` and identical bytes satisfy every pin |
-| Head entry object fails authentication (overwritten on an unversioned backend) | Take the good copy from the mirror, write its content as a new revision with a fresh `object_id` whose parent is the damaged object's parent, and point the index at it. History behind the damaged object survives only where a mirror or S3 version holds it |
+| Head entry object fails authentication or its hash (overwritten on an unversioned backend) | Take the good copy from the mirror, write its content as a new revision with a fresh `object_id` whose parent is the damaged object's parent, and point the index at it. History behind the damaged object survives only where a mirror or S3 version holds it |
 | A member forged the vault state: a password wrap that the correct password no longer opens, counters at the cap, or unknown devices that cannot be revoked normally | `--rekey`, below |
 
 ### Rekey
@@ -1426,15 +1436,18 @@ entry objects stay readable. It runs on any device that can still read the vault
 2. Ask for the new master password twice. It may equal the current one.
 3. Choose the index to keep: the mirrored one by default, or one from `--from-version`. Show its
    writer and entry count.
-4. Check each keyring VK against an entry object of its epoch from the mirror, where one exists,
-   and stop if any fails to open it. VKs of epochs with no mirrored entry are carried unchecked; a
-   forged one only fails to open objects that never existed.
+4. Walk every object reachable from the chosen index (each head and tombstone and its history
+   chain, checking the hashes), and collect the `(vault_id, epoch)` pairs those objects use. Carry
+   forward only the VKs of those pairs, each checked by opening one object that uses it. Filler
+   VKs, forged lineages, and objects that no chosen chain reaches are dropped, so a member cannot
+   fill the keyring or lineage limits to block a rekey. A chain whose objects cannot be fetched
+   stops the rekey with the list, unless `--drop-unreachable` accepts losing that history.
 5. Print the revocation commands for every IAM user under the vault's path except this device's,
    and wait until the user confirms they ran them. Until they do, any old device key can replay the
    old lineage to devices that have not re-enrolled.
 6. Generate a new `vault_id`, a new secret key, and `VK_1` of the new lineage. Build a header with
-   `header_seq = 1`, `epoch = 1`, an empty keyring, the legacy lineages plus the old lineage
-   (its keyring and its current VK), a password wrap under the new password and secret key, and a
+   `header_seq = 1`, `epoch = 1`, an empty keyring, the carried VKs grouped into legacy lineages by
+   `vault_id`, a password wrap under the new password and secret key, and a
    device record for this device only. Write it over the old header with `If-Match`.
 7. Publish the chosen index re-sealed under the new lineage, with `index_seq = 1` and an empty
    `applied` table. Move this device's mirror to the new `vault_id` directory.
@@ -1837,9 +1850,9 @@ in its test suite.
 | `kdf.json` | NFKC normalisation, Argon2id `pw_key` and AUK, with the test parameters and with the floor parameters; the parameter bounds |
 | `subkeys.json` | Every `K_purpose` for two epochs |
 | `wraps.json` | Password wrap and hybrid device wraps of a fixed VK, with the ML-KEM-768 seed, encapsulation key, encapsulation randomness, ciphertext, and shared secret |
-| `header.json` | A full header after a rotation: a writer, two devices with enrollment times and `enrolled_by`, a one-entry keyring, one legacy lineage, a rotation commitment, and the MAC |
-| `entry.json` | Entry objects: a first revision, an edit, one whose content crosses a 512-byte boundary, and one sealed under a legacy lineage |
-| `index.json` | An index with a writer, entries (one a conflict copy with the conflict-of extension item), a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
+| `header.json` | A full header after a rotation: a writer, two devices with enrollment times and `enrolled_by`, a one-entry keyring, one legacy lineage and its legacy pin, a rotation commitment, and the MAC |
+| `entry.json` | Entry objects with their SHA-256 and parent hash: a first revision, an edit, one whose content crosses a 512-byte boundary, and one sealed under a legacy lineage |
+| `index.json` | An index with a writer, entries with head hashes (one a conflict copy with the conflict-of extension item), a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
 | `device-file.json` | A password-sealed device file, whose bundle includes the ML-KEM-768 seed |
 | `export.json` | Encrypted exports with history, with and without the secret key, including `sk_check` |
 | `enrollment.json` | An invite, `K_invite`, an enrollment request object, its comparison code, and a vault configuration line |

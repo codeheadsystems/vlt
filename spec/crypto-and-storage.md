@@ -85,6 +85,7 @@ The requirements document holds the full threat model. The properties this spec 
 | Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it, provided the secret key was rotated or the master password resists offline guessing (the holder knows the old secret key). While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
 | Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. A password change that the user marks as an exposure (`vlt passwd` asks) also rotates the vault key, which cuts this off for content written afterwards |
 | Holder of a photographed invite | Reads all ciphertext and writes, as a stolen device key does, until that device's AWS key is deleted. Obtains the VK only if the user types a comparison code the holder's own request produced |
+| Recorder of bucket contents or network traffic, with a future quantum computer | Every key that protects content is symmetric (256-bit) or derived through a hybrid of X25519 and ML-KEM-768, so the vault stays protected unless both X25519 and ML-KEM-768 are broken. A quantum attacker that breaks X25519 alone learns nothing |
 | Holder of a powered-off device | Needs the master password (no-keyring CLI), the OS login (keyring CLI), or the device biometric (Android) to unlock |
 
 Out of scope: malware running as the user on an unlocked device, a process with the user's UID
@@ -100,12 +101,14 @@ leaks listed above.
 | Header MAC | HMAC-SHA256 | `hmac`, `sha2` |
 | AEAD | XChaCha20-Poly1305, 24-byte random nonce | `chacha20poly1305` |
 | Key agreement | X25519 | `x25519-dalek` |
+| Key encapsulation | ML-KEM-768 (FIPS 203) | `ml-kem` |
 | Secret hygiene | Zero on drop | `zeroize` |
 | Password normalisation | Unicode NFKC | `unicode-normalization` |
 | Randomness | OS CSPRNG | `getrandom`, `rand_core` |
 
-`hmac`, `unicode-normalization`, `getrandom`, and `rand_core` are additions to the decided crate
-list. `hmac` is already a dependency of `hkdf`, and `rand_core` of `x25519-dalek`.
+`hmac`, `unicode-normalization`, `getrandom`, `rand_core`, and `ml-kem` are additions to the decided
+crate list. `hmac` is already a dependency of `hkdf`, and `rand_core` of `x25519-dalek`. `ml-kem` is
+RustCrypto's pure-Rust FIPS 203 implementation; it is used only together with X25519, never alone.
 
 Nonces are always random. With a 192-bit nonce, random nonces under one key carry no practical
 collision risk at vlt's write volume. No counter nonces are used, so no nonce state needs to survive
@@ -123,7 +126,7 @@ flowchart TD
     SK[secret key, 16 bytes] --> AUK
     PWK --> AUK[account unlock key, AUK]
     AUK -->|password wrap| VK
-    DK[device X25519 private key] -->|X25519 with ephemeral key, HKDF| DWK[device wrap key]
+    DK[device X25519 and ML-KEM-768 private keys] -->|X25519 and ML-KEM-768, HKDF| DWK[device wrap key]
     DWK -->|device wrap| VK[vault key VK, epoch e]
     VK --> HM[K_header_mac]
     VK --> MK[K_meta]
@@ -187,20 +190,34 @@ keeps rotation and history reads simple.
 
 ### Device keys
 
-Each device has a **device ID** (16 random bytes) and an X25519 key pair generated on the device.
-The private key never leaves the device. The header holds one **device wrap** of the current VK per
-enrolled device:
+Each device has a **device ID** (16 random bytes) and two key pairs generated on the device: an
+X25519 key pair and an ML-KEM-768 key pair. The ML-KEM-768 private key is stored as its 64-byte
+seed `d || z` (FIPS 203, `ML-KEM.KeyGen_internal`). Private keys never leave the device. The header
+holds one **device wrap** of the current VK per enrolled device, built as a hybrid of both:
 
 ```
-eph_sk, eph_pk = fresh X25519 key pair
-ss  = X25519(eph_sk, device_pk)          ; reject if all 32 bytes are zero
-DWK = HKDF(ikm = ss, salt = eph_pk || device_pk, info = "vlt/v1/device-wrap")
+eph_sk, eph_pk  = fresh X25519 key pair
+ss_x            = X25519(eph_sk, device_pk)          ; reject if all 32 bytes are zero
+kem_ct, ss_m    = ML-KEM-768.Encaps(kem_ek)
+DWK = HKDF(ikm  = ss_m || ss_x,
+           salt = eph_pk || device_pk || SHA-256(kem_ek) || SHA-256(kem_ct),
+           info = "vlt/v1/device-wrap")
 ct  = AEAD(DWK, nonce, VK_e, "vlt/v1/device-wrap" || vault_id || u32 epoch || device_id)
 ```
 
-X25519 lets an enrolled device wrap the VK to a new device's public key without the new device's
-private key ever moving, which is what enrollment by QR code needs. A device wrap proves nothing
-about who wrote it, because `device_pk` is public; first-unlock trust comes from the invite instead
+The device recomputes `ss_x` with its X25519 private key and `ss_m` with `ML-KEM-768.Decaps`, whose
+implicit rejection turns a tampered `kem_ct` into an unrelated secret and so into an AEAD failure.
+A writer checks `kem_ek` with the FIPS 203 encapsulation-key check before encapsulating, and a
+reader rejects a header whose `kem_ek` fails it.
+
+`DWK` depends on both shared secrets, so recovering it needs both X25519 and ML-KEM-768 broken. The
+salt binds every public value of the exchange, which keeps the combination sound without relying on
+properties of either component.
+
+Public-key wrapping lets an enrolled device wrap the VK to a new device without the new device's
+private keys ever moving, which is what enrollment needs, and lets a rotation wrap a new VK to every
+remaining device without any device knowing another's secrets. A device wrap proves nothing about
+who wrote it, because the public keys are public; first-unlock trust comes from the invite instead
 (see [Device enrollment](#device-enrollment)).
 
 ### Password wrap
@@ -303,7 +320,7 @@ Clients check these before allocating or decrypting. For objects fetched from th
 
 | Item | Limit |
 | --- | --- |
-| Header object | 64 KiB |
+| Header object | 128 KiB |
 | Header `device_count` | 32 |
 | Metadata keyring entries | 1,000 |
 | Index object | 16 MiB |
@@ -329,7 +346,7 @@ Clients check these before allocating or decrypting. For objects fetched from th
 | 65 | `pw_nonce` | `b24` | |
 | 89 | `pw_ct` | `b48` | Password wrap of `VK_epoch` |
 | 137 | `device_count` | `u16` | |
-| 139 | `devices` | 152 bytes each | See below, sorted by `device_id` |
+| 139 | `devices` | 2,424 bytes each | See below, sorted by `device_id` |
 | | `meta_nonce` | `b24` | |
 | | `meta_ct` | `bytes32` | Encrypted metadata |
 | | `mac` | `b32` | `HMAC(K_header_mac, every preceding byte)` |
@@ -349,10 +366,14 @@ Device record:
 | Field | Type |
 | --- | --- |
 | `device_id` | `b16` |
-| `device_pk` | `b32` |
+| `device_pk` | `b32` (X25519) |
+| `kem_ek` | `b1184` (ML-KEM-768 encapsulation key) |
 | `eph_pk` | `b32` |
+| `kem_ct` | `b1088` |
 | `nonce` | `b24` |
 | `ct` | `b48` |
+
+A header with 32 devices and a full keyring stays under the 128 KiB limit.
 
 Metadata plaintext, sealed as
 `AEAD(K_meta, meta_nonce, meta_plain, "vlt/v1/meta" || vault_id || u32 epoch)`:
@@ -949,9 +970,9 @@ reminds the user to write an export first.
 
 ## Device key storage
 
-A device's **device secret bundle** holds its device ID, X25519 private key, and S3 access key ID
-and secret. The secret key is not in the bundle; devices read the current one from the header
-metadata.
+A device's **device secret bundle** holds its device ID, X25519 private key, ML-KEM-768 seed, and S3
+access key ID and secret. The secret key is not in the bundle; devices read the current one from the
+header metadata.
 
 | Platform | Storage | Unlock needs |
 | --- | --- | --- |
@@ -992,7 +1013,7 @@ LK = HKDF(ikm = Argon2id(NFKC(master_password), kdf_salt, ...), salt = vault_id,
           info = "vlt/v1/local-wrap")
 ```
 
-Bundle plaintext: `b16 device_id`, `b32 device_sk`, `str16 access_key_id`,
+Bundle plaintext: `b16 device_id`, `b32 device_sk`, `b64 kem_seed`, `str16 access_key_id`,
 `str16 secret_access_key`, `ext`.
 
 This file depends on the master password but not on the header's KDF block, so a password change on
@@ -1020,16 +1041,16 @@ the kit path uses the master password and the emergency kit instead.
    terminal only and is cleared when enrollment ends.
 3. On the new device, run `vlt enroll` and scan the invite or paste it at a hidden prompt (never as
    a command-line argument). The new device decodes it strictly, sets its pins from it, generates
-   its X25519 key pair, builds the [enrollment request](#enrollment-request-object), and `PUT`s it
-   with the access key from the invite and `If-None-Match: *`. On `412` it `GET`s the stored object
-   and continues only if it is byte-identical to its own request (a retried upload); otherwise it
-   reports that someone else answered this invite and stops. It then shows the **comparison code**
-   of its own request bytes.
-4. The inviting device polls for the request, opens it, and checks `device_id` and `kind`. It asks
-   the user to type the comparison code shown on the new device and compares it with the code of
-   the bytes it fetched. It approves exactly those bytes and never refetches. On a match it adds the
-   device record and metadata entry, increments `header_seq`, recomputes the MAC, writes the header
-   with `If-Match`, republishes the index, and deletes the pending invite.
+   its X25519 and ML-KEM-768 key pairs, builds the [enrollment request](#enrollment-request-object),
+   and `PUT`s it with the access key from the invite and `If-None-Match: *`. On `412` it `GET`s the
+   stored object and continues only if it is byte-identical to its own request (a retried upload);
+   otherwise it reports that someone else answered this invite and stops. It then shows the
+   **comparison code** of its own request bytes.
+4. The inviting device polls for the request, opens it, and checks `device_id`, `kind`, and
+   `kem_ek`. It asks the user to type the comparison code shown on the new device and compares it
+   with the code of the bytes it fetched. It approves exactly those bytes and never refetches. On a
+   match it adds the device record and metadata entry, increments `header_seq`, recomputes the MAC,
+   writes the header with `If-Match`, republishes the index, and deletes the pending invite.
 5. The new device polls the header until its device record appears, unlocks through its device
    wrap, checks the header against the pins from the invite, and fills its mirror. A new device
    without an OS keyring then asks for the master password, checks it against the password wrap,
@@ -1047,8 +1068,9 @@ expired, or interrupted invite leaves its pending-invite record, and with it a l
 them. The device script tolerates an IAM user that already exists, so a label can be invited again.
 
 A request that fails to open, a `device_id` that differs from the invite's, a `kind` outside 1 to 4,
-or a typed code that does not match is treated as a compromised invite: the inviting device cancels
-it, prints the revocation script for its access key, and exits with code 6.
+a `kem_ek` that fails the FIPS 203 check, or a typed code that does not match is treated as a
+compromised invite: the inviting device cancels it, prints the revocation script for its access key,
+and exits with code 6.
 
 The invite contains the new device's long-lived AWS key, so a photograph of it gives the same
 access as a stolen device key for as long as that key lives, whether or not the real device is
@@ -1096,8 +1118,8 @@ Key: `<prefix>enroll/<device_id hex>`, written by the new device with `If-None-M
 K_invite = HKDF(ikm = invite_secret, salt = vault_id, info = "vlt/v1/invite")
 ```
 
-Plaintext: `u8 kind`, `b32 device_pk`, `ext`. Only a holder of the invite can write a request that
-opens, so a bucket writer without the invite cannot substitute one.
+Plaintext: `u8 kind`, `b32 device_pk`, `b1184 kem_ek`, `ext`. Only a holder of the invite can write
+a request that opens, so a bucket writer without the invite cannot substitute one.
 
 The comparison code is `crock(SHA-256("vlt/v1/enroll-compare" || request object)[0..10])`, shown
 in four groups of four.
@@ -1581,6 +1603,8 @@ Firefox (WASM) reuse it unchanged.
   exposes encode, decode, seal, open, merge, and history functions, plus a sans-I/O sync state
   machine that tells its caller which objects to fetch or write. Chain walks during merge and
   history are fetch requests from that state machine.
+- `ml-kem` is pure Rust with no operating system dependencies, so it builds for `wasm32` and
+  Android like the other primitives.
 - Randomness comes from `getrandom` inside `vlt-core` (with the `wasm_js` backend and its `cfg` flag
   on WASM). Crate-internal functions take a `rand_core` RNG so that tests and vector generation are
   deterministic; the public API does not expose it, because UniFFI cannot express it.
@@ -1600,17 +1624,17 @@ in its test suite.
 | `secret-key.json` | Secret key text encoding, decoding with lower case, `O`/`I` substitution, and invalid inputs |
 | `kdf.json` | NFKC normalisation, Argon2id `pw_key` and AUK, with the test parameters and with the floor parameters; the parameter bounds |
 | `subkeys.json` | Every `K_purpose` for two epochs |
-| `wraps.json` | Password wrap and device wraps of a fixed VK |
+| `wraps.json` | Password wrap and hybrid device wraps of a fixed VK, with the ML-KEM-768 seed, encapsulation key, encapsulation randomness, ciphertext, and shared secret |
 | `header.json` | A full header after a rotation: two devices with enrollment times, a one-entry keyring, a rotation commitment, and the MAC |
 | `entry.json` | Entry objects: a first revision, an edit, and one whose content crosses a 512-byte boundary |
 | `index.json` | An index with entries, a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
-| `device-file.json` | A password-sealed device file |
+| `device-file.json` | A password-sealed device file, whose bundle includes the ML-KEM-768 seed |
 | `export.json` | Encrypted exports with history, with and without the secret key, including `sk_check` |
 | `enrollment.json` | An invite, `K_invite`, an enrollment request object, its comparison code, and a vault configuration line |
 | `entry-text.json` | Parsing cases for the entry text format, including blocks, `otpauth://`, and a separator |
 | `tamper.json` | For each object kind, including enrollment requests, inputs with one flipped byte per field, each of which must be rejected |
 
 The vectors were generated by a throwaway program written against the decided crates, and the
-Argon2id, HKDF, HMAC, NFKC, X25519, and XChaCha20-Poly1305 values were cross-checked with
-independent Python implementations. That program is not part of the repository; the vectors are the
-reference.
+Argon2id, HKDF, HMAC, NFKC, X25519, ML-KEM-768, and XChaCha20-Poly1305 values were cross-checked
+with independent Python implementations. That program is not part of the repository; the vectors are
+the reference.

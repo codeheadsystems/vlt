@@ -55,8 +55,8 @@ Integration tests against RustFS run in Docker. AWS integration tests run only w
 ## Crypto rules
 
 - Primitives come from RustCrypto only: `argon2`, `chacha20poly1305` (XChaCha20-Poly1305),
-  `x25519-dalek`, `hkdf`, `sha2`, `zeroize`. No custom primitives and no hand-rolled constructions
-  beyond what the spec defines.
+  `x25519-dalek`, `ml-kem` (ML-KEM-768, only in the hybrid device wrap), `hkdf`, `sha2`, `zeroize`.
+  No custom primitives and no hand-rolled constructions beyond what the spec defines.
 - No `unsafe` outside narrowly justified blocks, each with a comment giving the justification.
 - No plaintext on disk. No secrets in logs, error messages, or panics.
 - Secret types hold their bytes in `zeroize` buffers and do not implement `Debug` or `Display`.

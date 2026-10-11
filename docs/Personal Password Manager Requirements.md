@@ -245,7 +245,7 @@ The big decisions were made on 2026-10-10; what remains can be settled in the sp
 | Users | Single user only |
 | Name | vlt |
 
-| Crypto crates | RustCrypto (`argon2`, `chacha20poly1305`, `x25519-dalek`, `hkdf`, `sha2`, `zeroize`); XChaCha20-Poly1305 for AEAD |
+| Crypto crates | RustCrypto (`argon2`, `chacha20poly1305`, `x25519-dalek`, `ml-kem`, `hkdf`, `sha2`, `zeroize`); XChaCha20-Poly1305 for AEAD; device wraps use a hybrid of X25519 and ML-KEM-768 so recorded ciphertext resists a future quantum computer |
 | Credential lifetime | Long-lived IAM access key per device, scoped to the vault prefix; short-lived credentials (STS or IAM Roles Anywhere) are out of scope for v1 |
 | AWS hardening | Dedicated bucket required; `vlt init` refuses to proceed if versioning is off and warns if Object Lock is off |
 | Single-disk RustFS | Supported with a weaker guarantee: without versioning, a stolen device key can overwrite history. `vlt init` warns. Entry objects are always written with `If-None-Match: *` |

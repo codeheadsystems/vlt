@@ -1,0 +1,34 @@
+[package]
+name = "vlt-core"
+version = "0.1.0"
+description = "vlt crypto, formats, and pure vault logic; no I/O"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2.workspace = true
+chacha20poly1305.workspace = true
+x25519-dalek.workspace = true
+ml-kem.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+unicode-normalization.workspace = true
+getrandom.workspace = true
+rand_core.workspace = true
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["sys_rng", "wasm_js"] }
+
+[dev-dependencies]
+zeroize.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

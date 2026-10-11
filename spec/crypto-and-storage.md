@@ -1081,9 +1081,9 @@ The Firefox native-messaging host (phase 4) is a client of the same protocol.
 
 ## Emergency kit and recovery
 
-`vlt init`, `vlt kit`, and any `vlt revoke` that rotates the secret key print the **emergency kit** to standard
-output, formatted for a printer. It is not written to disk unless `--output <file>` is given, which
-warns.
+`vlt init`, `vlt kit`, and any `vlt revoke` that rotates the secret key print the **emergency kit**
+to standard output, formatted for a printer. It is not written to disk unless `--output <file>` is
+given, which warns.
 
 | Kit field | Example |
 | --- | --- |

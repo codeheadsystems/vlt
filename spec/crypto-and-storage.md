@@ -101,6 +101,7 @@ The requirements document holds the full threat model. The properties this spec 
 | Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. A password change that the user marks as an exposure (`vlt passwd` asks) also rotates the vault key, which cuts this off for content written afterwards |
 | Holder of a photographed invite | Reads all ciphertext and writes, as a stolen device key does, until that device's AWS key is deleted. Obtains the VK only if the user types a comparison code the holder's own request produced |
 | Recorder of bucket contents or network traffic, with a future quantum computer | Every key that protects content is symmetric (256-bit) or derived through a hybrid of X25519 and ML-KEM-768, so the vault stays protected unless both X25519 and ML-KEM-768 are broken. A quantum attacker that breaks X25519 alone learns nothing |
+| Holder of a device with a [local vault](#local-vaults) | The local store is the vault, so the device holder is also the store's reader and writer. A restore of an older home-directory backup rolls the store and the mirror back together, which no pin can detect. A backup that holds the password-sealed device file allows offline guessing of the password alone, at that file's KDF parameters |
 | Holder of a powered-off device | Needs the master password (no-keyring CLI), the OS login (keyring CLI), or the device biometric (Android) to unlock |
 
 Out of scope: malware running as the user on an unlocked device, a process with the user's UID
@@ -291,7 +292,9 @@ Argon2 work, which keeps per-device unlock under 100 ms.
 
 ## Bucket layout
 
-The vault lives under a configured prefix (default `vlt/`) in a dedicated bucket.
+The vault lives under a configured prefix (default `vlt/`) in a dedicated bucket. A [local
+vault](#local-vaults) uses the same keys, without the prefix, in its local store until a bucket is
+attached.
 
 | Object key | Contents | Written with |
 | --- | --- | --- |
@@ -334,6 +337,7 @@ emit `count = 0` everywhere else.
 | Type | Bits | Used in | Value |
 | --- | --- | --- | --- |
 | `0x4001` | copy-safe | Index entry | **Conflict-of**: the UTF-8 path of the conflict copy's original. Marks the entry as a conflict copy. Kept when the copy is edited or moved; it disappears only when `vlt resolve` removes the copy |
+| `0x4002` | copy-safe | Index entry | **History floor**: a `u64` revision. Revisions of this entry below it were purged. Written by `vlt purge commit --history`; history walks end at the floor revision, mirrors delete objects below it and never fetch them. Kept across edits and moves; a later purge raises it |
 
 ## Size limits
 
@@ -778,16 +782,23 @@ A background publish that fails after its command has exited is recorded by the 
 
 ### Offline operation
 
-An enrolled device works without a network. `--offline` on any command, or the setting
-`sync.offline true`, keeps the device from contacting the backend at all until `vlt sync` or until
-the setting is cleared; the status line then shows `offline (by choice)`.
+An enrolled device works without a network. `--offline` on any command keeps that command from
+contacting the backend. The setting `sync.offline true` does the same for every command and stops
+the agent's polling and background publishing. `vlt sync` contacts the backend once without
+clearing the setting. Writes still queue; with `--strict`, a write under `--offline` exits 9 at
+once. Offline mode never applies to a local store, which needs no network.
+
+After a connectivity failure, a CLI command without an agent records the time in a non-secret
+file, `netskip`, in the vault's data directory, and later commands skip the network until 60 s have
+passed. The skip does not apply to `vlt sync` or to commands that need the backend.
 
 | Works offline, from the mirror | Needs the backend |
 | --- | --- |
 | Unlock (device wrap or password), `show`, `ls`, `find`, `grep`, `totp`, `show -c` | `vlt init` with a bucket, and [`vlt attach`](#attaching-a-store) |
 | `insert`, `edit`, `generate`, `rm`, `mv`, `cp`, `restore`, `resolve`: queued | `vlt invite` and `vlt enroll` |
 | `log`, `diff`, `show --rev`: complete with `mirror.history = full` | `vlt revoke`, `vlt passwd`, `vlt repair`, including `--rekey` |
-| `conflicts`, `devices`, `kit`, `status`, `teardown` (prints only), the password check | `vlt purge`, `vlt doctor` |
+| `conflicts`, `devices`, `status`, `teardown` (prints only), the password check | `vlt purge`, `vlt doctor` |
+| `kit`: from the mirror, marked "as of <last sync>; may be outdated", without the kit confirmation | `vlt kit` with the confirmation, which needs a fresh header so that it never confirms a superseded secret key |
 | `export` in every format, `import` into the queue | `vlt sync` |
 
 A command that needs the backend and cannot reach it fails at once with exit code 7 and says that it
@@ -806,10 +817,14 @@ when stderr is a terminal and any of these hold. The items appear in this order,
 | The write queue is not empty | `<n> changes not yet synced` (with `, unlock to sync` on a locked no-keyring agent) |
 | Conflict copies exist | `<n> conflicts, run vlt conflicts` |
 | Rotation pending | `another device is finishing a key change` |
-| A local vault with no store and no encrypted export in 30 days | `local vault: no copy elsewhere` |
+| The last successful sync is more than 1 hour old (`sync.stale_after`), whatever the cause | `last synced <time> ago` |
+| `sync.offline` is set | `offline (by choice)` |
+| An attach is in progress or interrupted | `attaching to <bucket>, run vlt attach to resume` |
+| A local vault with no encrypted export written in 30 days | `local vault: no recent export` |
 
 `--json` results carry the same conditions as the fields `last_publish_error`, `queue_len`,
-`conflicts`, and `rotation_pending`. A script that needs certainty uses `--strict`.
+`conflicts`, `rotation_pending`, `last_sync`, `offline`, `attaching`, and `local`. A script that
+needs certainty uses `--strict`.
 
 Cost at current S3 prices ($0.0004 per 1,000 `GET` requests, $0.005 per 1,000 `PUT` requests,
 $0.023 per GB-month):
@@ -832,7 +847,7 @@ The **mirror** is a directory, `$XDG_DATA_HOME/vlt/<vault_id hex>/`, created wit
 | --- | --- |
 | `header` | Last accepted header object, verbatim |
 | `index` | Last accepted index object, verbatim, and its etag |
-| `e/<object_id hex>` | Entry objects, verbatim. With `mirror.history = full`, the default, every object reachable from a head or tombstone, which makes history and exports complete offline. With `mirror.history = heads`, for devices short of space, every current head and tombstone head, plus history objects already read |
+| `e/<object_id hex>` | Entry objects, verbatim. With `mirror.history = full`, every object reachable from a head or tombstone down to its history floor, which makes history and exports complete offline. With `mirror.history = heads`, every current head and tombstone head, plus history objects the user has displayed |
 | `state` | Pins, etags, the next `op_seq`, and the write queue, sealed with `K_mirror` |
 
 Objects in the mirror are the bucket's ciphertext, unchanged, so the mirror holds no plaintext and
@@ -862,13 +877,24 @@ Publishing the queue:
 Only one process owns a mirror at a time: the agent if it is running, otherwise the CLI process,
 which takes an exclusive `flock` on `state`.
 
-Full history costs little: entry objects are 512 bytes at their smallest, so 5,000 entries with ten
-revisions each take about 25 MB, and filling it at enrollment takes about 50,000 `GET`s, about
-$0.02. Afterwards each new revision is fetched once, as a head.
+The default depends on the platform:
+
+| Platform | Default | Fill |
+| --- | --- | --- |
+| CLI, desktop | `full` | At enrollment and in the background |
+| Android | `full` | Only on unmetered networks; heads are always fetched |
+| Firefox | `heads` | None |
+
+Full history is small: entry objects are 512 bytes at their smallest, so 5,000 entries with ten
+revisions each take about 25 MB. Filling it takes one `GET` per revision, about 50,000 for that
+vault and about $0.02, which is why phones fill only on unmetered networks. Afterwards each new
+revision is fetched once, as a head. A `404` during the fill means the object was purged; the
+mirror records it in `state` and does not request it again.
 
 The mirror prunes entry objects that are no longer reachable from any head or tombstone in the
-current index (or, with `mirror.history = heads`, from any head or tombstone directly), except
-history objects it has already read and objects this device published in the last 30 days. The
+current index (or, with `mirror.history = heads`, from any head or tombstone directly), and every
+object below an entry's history floor. It keeps history objects the user has displayed, unless they
+are below a floor, and objects this device published in the last 30 days. The
 second exception keeps a device's own recent writes recoverable after a rollback repair on another
 device drops them from the index.
 
@@ -899,7 +925,12 @@ local store instead of probing, so it needs no network. With a bucket:
 2. Print the [setup script](#setup-and-teardown-scripts) and ask the user to run it with admin
    credentials. `vlt init --print-setup` prints only the script, so it can be piped to a shell.
 3. Read the device's access key: the JSON that the script prints, pasted whole, or the two values
-   at separate prompts, or the standard `AWS_*` variables.
+   at separate prompts, or the standard `AWS_*` variables. vlt never uses an SDK's default
+   credential chain. Before storing the key it checks, as `vlt doctor` does, that the key cannot
+   delete, and refuses a key that can, which catches admin credentials left in the shell by the
+   setup script. On AWS it also calls `GetCallerIdentity` with the key to learn the account ID,
+   which every later request sends as `x-amz-expected-bucket-owner`, so a bucket name that changes
+   owner after a teardown is refused.
 4. Prompt for the master password twice, calibrate the KDF, and generate the secret key, `VK_1`,
    the header, and an empty index. Nothing has been written yet.
 5. Run the [capability probe](#capability-probe), which writes the header and the index.
@@ -913,64 +944,122 @@ local store instead of probing, so it needs no network. With a bucket:
 
 A **local vault** lives on one device with no bucket. It uses every format in this spec unchanged;
 only the backend differs. A local vault can later [attach a store](#attaching-a-store), after which
-it is an ordinary vault and can enroll devices.
+it is an ordinary vault and can enroll devices. The CLI and Android can create local vaults; the
+Firefox extension cannot, because extension storage can be cleared by the browser and offers no
+exclusive locking. A later phase may add it.
+
+### Backend descriptor
+
+Each device records, per vault, where the vault's objects live, in a non-secret **backend
+descriptor** kept in `$XDG_DATA_HOME/vlt/vaults.toml` (app-private storage on Android) and keyed by
+`vault_id`:
+
+| Form | Meaning |
+| --- | --- |
+| `local:<store path>` | A local store at that path |
+| `s3:<vault configuration line>` | A bucket, with the AWS account ID where known |
+
+Rekey and attach update the descriptor. Secrets never go in it.
 
 ### Local backend
 
-The **local store** is a directory, `$XDG_DATA_HOME/vlt/<vault_id hex>/store/`, mode `0700`, that
-holds objects under the same keys as the bucket layout without the prefix: `header`, `index`, and
-`e/<object_id hex>`. It holds only ciphertext. It implements the backend operations the sync engine
-uses:
+The **local store** is a directory, `$XDG_DATA_HOME/vlt/stores/<store id>/` with a random store ID,
+mode `0700`, kept apart from the mirror so that rekey and re-enrollment, which rename mirror
+directories, never move it. It holds objects under the bucket layout's keys without the prefix:
+`header`, `index`, and `e/<object_id hex>`, as ciphertext only.
 
-| Operation | Local behaviour |
+Every local backend meets this contract, whatever the platform:
+
+| Operation | Guarantee |
 | --- | --- |
-| `GET` | Read the file. The etag is the lowercase hex SHA-256 of its bytes |
-| `PUT` with `If-None-Match: *` | Create the file with `O_EXCL`, after writing a temporary file, `fsync`ing it, and linking it into place; an existing file is a `412` |
-| `PUT` with `If-Match` | Under an exclusive `flock` on the store, compare the current etag, then write a temporary file, `fsync`, and rename it over the old one; a mismatch is a `412` |
-| Delete | Used only by `vlt purge` on a local vault, which deletes the planned files itself after confirmation |
+| `GET` | Returns the bytes last written and an opaque etag that changes whenever the bytes do |
+| Create if absent | Atomic: exactly one of two concurrent creates succeeds, and the other gets `412`. Durable before it returns |
+| Compare and swap | Atomic against the current etag; a mismatch is `412`. Durable before it returns, and visible to the next `GET` |
+| Delete | Used only by `vlt purge` on a local vault |
+
+| Platform | Realisation |
+| --- | --- |
+| CLI (Linux, FreeBSD) | The etag is the hex SHA-256 of the bytes. Create writes a temporary file, `fsync`s it, and links it into place with `link` (failing if the name exists); compare and swap runs under an exclusive `flock` on the store, writes a temporary file, `fsync`s it, renames it over the old one, and `fsync`s the directory. vlt warns when the store is on NFS, where `flock` is unreliable |
+| Android | App-private internal storage, the same file operations, and every write serialised through the one process that owns the vault. The store, the mirror, and the device file are excluded from Android Auto Backup in the app's backup rules. Uninstalling the app deletes the vault, which the app says before a local vault is created |
 
 The mirror, the write queue, the agent, and the sync engine work as on any backend, so a local vault
 has the same history, conflicts, and offline behaviour. The local store has no object versioning,
-so history is the client-side history alone. Android and Firefox clients implement the same backend
-over their own app storage.
+so history is the client-side history alone.
 
 A local vault has no access key: the device secret bundle carries empty `access_key_id` and
 `secret_access_key` until a store is attached. `vlt invite` and `vlt enroll` refuse with a message
-naming `vlt attach`. `vlt revoke` does not apply, because there is one device. Every other command
-works, including `vlt passwd` and `vlt repair --rekey`.
+naming `vlt attach`. `vlt revoke` does not apply, because there is one device. Other commands
+behave as follows:
 
-The vault exists on one disk only, so losing the device loses the vault unless an encrypted export
-exists. `vlt init --local` says so, and the status line repeats `local vault: no copy elsewhere`
-until either a store is attached or an encrypted export has been written in the last 30 days.
+| Command | On a local vault |
+| --- | --- |
+| `vlt doctor` | Checks the SHA-256 of every object against the index and the hash chain, and the modes of the store, mirror, and device file. No probe |
+| `vlt teardown` | Prints the store and mirror paths to delete; no script |
+| `vlt repair --rekey` | As usual, writing to the local store; step 6 has no IAM users to revoke. The store stays where it is and the descriptor keeps pointing at it |
+| `vlt purge` | Deletes from the store and the mirror itself, see [Deletion and purge](#deletion-and-purge) |
+
+The vault exists on one disk only. `vlt init --local` says that losing the device loses the vault
+unless an encrypted export exists; that restoring an older home-directory backup silently rolls the
+vault back; and, on a device without an OS keyring, that a backup holding the device file allows
+the password to be guessed offline without the secret key, so backups should exclude the vault's
+data directory or the device should use a keyring.
 
 ### Attaching a store
 
-`vlt attach` turns a local vault into an ordinary one:
+`vlt attach` turns a local vault into an ordinary one. It is written as a generic copy from one
+backend to another, so moving a vault between buckets can reuse it later. It is resumable at every
+step:
 
-1. Prompt for the endpoint, region, bucket, and prefix as `vlt init` does, check them against the
-   [script input rules](#setup-and-teardown-scripts), print the setup script, and read the access
-   key it prints.
-2. Run [capability probe](#capability-probe) steps 1 and 2. The bucket must be empty, or must hold
-   only objects whose bytes equal this vault's local objects, which lets an interrupted attach
-   resume.
-3. `PUT` every entry object in the local store with `If-None-Match: *`; on `412`, `GET` it and
-   require identical bytes.
-4. Run capability probe steps 3 to 7 with the local header and index bytes, which write them.
-5. `GET` every uploaded object and compare its SHA-256 with the local copy.
-6. Store the access key in the device secret bundle, record the bucket as the vault's backend, and
-   remove the local store. The mirror keeps every object, as before.
-7. Print the emergency kit, which now carries the vault configuration line, and run the [kit
-   confirmation](#kit-confirmation).
+1. Ask for the master password and check it against the password wrap, because attaching exposes
+   the vault and, on a device without an OS keyring, the device file must be resealed to hold the
+   access key.
+2. Prompt for the endpoint, region, bucket, and prefix as `vlt init` does, check them against the
+   [script input rules](#setup-and-teardown-scripts), print the setup script, and read and check
+   the access key exactly as `vlt init` step 3 does.
+3. Save an **attach record**: the vault configuration line and account ID in the mirror `state`,
+   and the access key in the device secret bundle marked pending (resealing the device file where
+   there is one). From now until step 9, the vault is frozen against header changes: entry and
+   index writes queue as usual, but are not published to the local store, and `vlt passwd`,
+   `vlt repair`, and `vlt purge` refuse. The status line shows the attach.
+4. List the whole bucket, every version and delete marker, with pagination. Each key must be one of
+   this vault's keys, and every version of it must equal the local bytes. A key from another vault
+   is refused with a message saying that the bucket belongs to another vault; any other foreign or
+   different object is refused. An empty bucket, or one holding only matching objects from an
+   interrupted attach, continues.
+5. Write the header: if the bucket already holds identical bytes, skip to step 6; otherwise run
+   [capability probe](#capability-probe) steps 1 and 3 to 6 with the local header bytes. A header
+   without an index is inert, so a backend that ignores the conditions is caught before any entry
+   is uploaded.
+6. `PUT` every entry object in the local store with `If-None-Match: *`, up to 16 at a time, skipping
+   those already present with identical bytes; on `412`, `GET` the object and require identical
+   bytes. Progress is checkpointed in the attach record.
+7. Write the index with `If-None-Match: *` (probe step 7), or skip it if identical bytes are
+   present. This is the commit point.
+8. `GET` every uploaded object, up to 16 at a time, and compare its SHA-256 with the local copy. A
+   mismatch is an integrity error (exit code 6): vlt lists the keys, keeps the local backend and
+   the attach record, and prints the admin command that empties the bucket, because entry keys are
+   write-once and cannot be uploaded again.
+9. Switch the backend, in this order: mark the access key in the bundle as active; point the
+   backend descriptor at the bucket; clear every cached etag, because local etags differ from S3's;
+   rename the local store to `store.attached-<date>`, which `vlt log` and `vlt repair` can read as
+   a history source; and delete the attach record. Then lift the freeze and publish the queue.
+10. Print the emergency kit, which now carries the vault configuration line, and run the [kit
+    confirmation](#kit-confirmation). The earlier kit's secret key, and every encrypted export, stay
+    valid.
 
-Attaching changes no key, no header field, and no object, so the secret key and every encrypted
-export stay valid. Writes made while an attach is under way are queued and published to the bucket
-once it finishes. After attaching, `vlt invite` and the kit path enroll further devices.
+The agent runs the attach. If the CLI disconnects, the agent continues; `vlt attach` with no
+arguments shows progress or resumes an interrupted attach from its record. `vlt attach --abandon`
+deletes the record, unfreezes the vault, and prints the admin command that empties the bucket.
+
+Attaching changes no key, no header field, and no object, so pins, writer IDs, the legacy pin, and
+`enrolled_by` carry over unchanged. After attaching, `vlt invite` and the kit path enroll further
+devices.
 
 ## Capability probe
 
-`vlt init` probes the backend before writing anything that matters, checking settings first so a
-refusal leaves nothing behind. The vault's own first objects serve as probes, because device keys
-cannot delete.
+`vlt init` and `vlt attach` probe the backend before writing anything that matters, checking
+settings first so a refusal leaves nothing behind. The vault's own first objects serve as probes,
+because device keys cannot delete.
 
 1. `GetBucketVersioning`, `GetObjectLockConfiguration`, and `GetBucketLifecycleConfiguration`.
    Apply the table below; a refusal stops here, with nothing written.
@@ -1484,15 +1573,20 @@ has two targets:
    objects inside their retention period cannot be deleted by anyone until it expires; the plan says
    so.
 3. Run `vlt purge commit <plan>`. vlt checks that every listed object is gone (`HEAD` returns `404`)
-   and, for `--deleted`, publishes an index with the tombstone removed.
+   and publishes an index that, for `--deleted`, drops the tombstone and, for `--history`, sets the
+   entry's [history floor](#extension-lists) to the oldest kept revision. Every mirror deletes the
+   purged objects at its next sync.
+
+On a local vault, `vlt purge` needs no admin credentials: after confirmation it deletes the planned
+objects from the local store and from the mirror itself, then commits.
 
 A tombstone leaves the index only through `vlt purge commit`. Tombstones cost a few dozen bytes
 each, and removing one without deleting its objects would leave ciphertext that neither `restore`
 nor `purge` could reach again.
 
 Purge does not reach older index versions, which still contain the path in encrypted form until the
-lifecycle rule expires them, other devices' mirrors until they next sync and prune, or encrypted
-exports. `vlt purge plan` prints these limits.
+lifecycle rule expires them, devices that do not sync again, a kept pre-attach local store, or
+encrypted exports. `vlt purge plan` prints these limits.
 
 ## Repair
 
@@ -1593,7 +1687,7 @@ it supports, and the client restarts the agent if the binaries differ.
 | `op` | Arguments | Result |
 | --- | --- | --- |
 | `hello` | `v`, `client_version` | Supported `v` values, agent version |
-| `status` | | `locked`, `vault_id`, `device_label`, `last_sync`, `queued`, `queue_len`, `last_publish_error`, `conflicts`, `rotation_pending`, `password_check_due` |
+| `status` | | `locked`, `vault_id`, `device_label`, `last_sync`, `queued`, `queue_len`, `last_publish_error`, `conflicts`, `rotation_pending`, `password_check_due`, `offline`, `attaching`, `local` |
 | `unlock` | `password` (absent for keyring unlock) | Nothing |
 | `password_check` | `password` | Whether it matches the password wrap; a match records the date |
 | `lock` | | Nothing |
@@ -1611,7 +1705,7 @@ it supports, and the client restarts the agent if the binaries differ.
 | `resolve` | `copy`, `keep` (`original` or `copy`), `content` (optional, from `--edit`) | New head ID and revision of the original |
 | `devices` | | Label, kind, enrollment time, and whether it is this device, per device; then pending invites with label and creation time |
 | `passwd` | `password`, `new_password`, `forgotten`, `rotate`, `recalibrate` | Nothing |
-| `attach` | `endpoint`, `region`, `bucket`, `prefix`, `access_key_id`, `secret_access_key` | A stream of progress responses sharing the request `id`, ended by one with `"done": true` |
+| `attach` | `password`, `endpoint`, `region`, `bucket`, `prefix`, `access_key_id`, `secret_access_key`; all absent to resume; `abandon` | A stream of progress responses sharing the request `id`, ended by one with `"done": true` |
 | `invite_create` | `label`, `access_key_id`, `secret_access_key` | Invite ID and invite text |
 | `invite_wait` | `invite_id` | Comparison code once the request arrives, or `expired` |
 | `invite_approve`, `invite_cancel` | `invite_id` | Nothing |
@@ -1646,7 +1740,7 @@ given, which warns.
 | --- | --- |
 | Printed | `2026-10-11` |
 | Secret key | `VLT1-....`, with its last group repeated as the **secret key ending**, for example `C51A` |
-| Vault configuration | The vault configuration line, as text and as a QR code. A local vault's kit says instead that the vault has no store yet, and that recovery needs this device or an encrypted export |
+| Vault configuration | The vault configuration line, as text and as a QR code. A local vault's kit prints the vault ID only, and says that the vault has no store yet and that recovery needs this device or an encrypted export |
 | Vault ID, endpoint, region, bucket, prefix | The same values, one per line, for typing |
 | Master password | A blank line to fill in by hand, or to leave blank and memorise |
 | Recovery steps | The procedure below |
@@ -1920,6 +2014,8 @@ key history), `fingerprint`, `pin`, and `rotation pending` do not appear; the us
 | `vlt init` against a bucket that already holds a vault | `vlt enroll` |
 | An encrypted export that needs another secret key | The secret key ending it needs |
 | An unknown label | The labels from `vlt devices` |
+| `vlt invite` or `vlt enroll` on a local vault | `vlt attach` |
+| `vlt attach` against a bucket that holds another vault, or other objects | Which, and that attach needs an empty bucket |
 | A header this device cannot open | "Cannot open the current header: this device was revoked, the vault was rekeyed, or the header was tampered with", and `vlt enroll`, which keeps the existing mirror. Never a suggestion to delete local data |
 
 ## Portability constraints
@@ -1955,7 +2051,7 @@ in its test suite.
 | `wraps.json` | Password wrap and hybrid device wraps of a fixed VK, with the ML-KEM-768 seed, encapsulation key, encapsulation randomness, ciphertext, and shared secret |
 | `header.json` | A full header after a rotation: a writer, two devices with enrollment times and `enrolled_by`, a one-entry keyring, one legacy lineage and its legacy pin, a rotation commitment, and the MAC |
 | `entry.json` | Entry objects with their SHA-256 and parent hash: a first revision, an edit, one whose content crosses a 512-byte boundary, and one sealed under a legacy lineage |
-| `index.json` | An index with a writer, entries with head hashes (one a conflict copy with the conflict-of extension item), a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
+| `index.json` | An index with a writer, entries with head hashes (one a conflict copy with the conflict-of extension item, one with a history floor), a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
 | `device-file.json` | A password-sealed device file, whose bundle includes the ML-KEM-768 seed |
 | `export.json` | Encrypted exports with history, with and without the secret key, including `sk_check` |
 | `enrollment.json` | An invite, `K_invite`, an enrollment request object, its comparison code, and a vault configuration line |

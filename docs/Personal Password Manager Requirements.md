@@ -251,7 +251,7 @@ The big decisions were made on 2026-10-10; what remains can be settled in the sp
 | Single-disk RustFS | Supported with a weaker guarantee: without versioning, a stolen device key can overwrite history. `vlt init` warns. Entry objects are always written with `If-None-Match: *` |
 | CLI device key at rest | OS keyring (Secret Service or KWallet) when available; otherwise wrapped by the master password |
 | IAM provisioning | vlt never holds admin credentials; enrollment and revocation print the IAM policy and `aws` (or RustFS `mc admin`) commands for me to run |
-| Local start | `vlt init --local` creates a vault with no bucket; `vlt attach` uploads it to a bucket later, after which devices can enroll |
+| Local start | `vlt init --local` (CLI and Android) creates a vault with no bucket; `vlt attach` uploads it to a bucket later, resumably, after which devices can enroll. Firefox cannot start local |
 | Licence | MIT; every dependency MIT, Apache-2.0, BSD, ISC, Zlib, or Unicode, enforced with `cargo-deny` |
 
 ### Still open

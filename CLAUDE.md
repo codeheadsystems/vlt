@@ -1,7 +1,8 @@
 # vlt
 
-vlt is a single-user, zero-knowledge password manager with pass ergonomics. Its only storage is an
-S3-compatible bucket (AWS S3 or RustFS) that holds ciphertext. The project is MIT licensed.
+vlt is a single-user, zero-knowledge password manager with pass ergonomics. Its shared storage is an
+S3-compatible bucket (AWS S3 or RustFS) that holds ciphertext; a vault can also start local on one
+device and attach a bucket later. The project is MIT licensed.
 
 ## Documents
 
@@ -24,7 +25,7 @@ optional Linux desktop app all build from it against the one Rust core.
 | Path | Role | Phase |
 | --- | --- | --- |
 | `crates/vlt-core` | Crypto, formats, index, merge, history, sync engine. No I/O beyond traits, no async runtime in the public API, no filesystem access. Builds for `wasm32-unknown-unknown` and stays UniFFI-friendly | 2 |
-| `crates/vlt-store` | S3 backend, local encrypted mirror, write queue, capability probe | 2 |
+| `crates/vlt-store` | S3 and local backends, local encrypted mirror, write queue, capability probe | 2 |
 | `crates/vlt-cli` | The `vlt` binary, agent, clipboard, completion | 2 |
 | `crates/vlt-import` | Bitwarden and pass import, pass export | 2 |
 | `crates/vlt-ffi` | UniFFI bindings over `vlt-core` for Android | 3 |

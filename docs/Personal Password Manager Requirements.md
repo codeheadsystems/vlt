@@ -94,7 +94,7 @@ The decrypted entry is a pass-format text file: line 1 is the password, then `ke
 - **History:** client-side history replaces `pass git`. Every edit writes a new immutable entry object that points at its predecessor; `vlt log` and `vlt restore` walk that chain. S3 Versioning, where the backend has it, is a second safety net.
 - **Writes:** write the entry object, then update `vlt/index` with a conditional `PutObject` (`If-Match` on the ETag). A `412 Precondition Failed` means another device won; re-read, merge, retry.
 - **Merge rule:** index changes merge per path. Two edits to the same entry keep the newer revision and save the other as `<path>.conflict-<device>`.
-- **Offline:** each client keeps an encrypted local mirror and a write queue, so reads always work and writes sync when the network returns.
+- **Offline:** each client keeps an encrypted local mirror, with full history by default, and a write queue, so reads always work and writes sync when the network returns. A vault can also start local on one device, with no bucket, and attach one later to add devices.
 
 ### Why not one file or DynamoDB
 
@@ -251,6 +251,7 @@ The big decisions were made on 2026-10-10; what remains can be settled in the sp
 | Single-disk RustFS | Supported with a weaker guarantee: without versioning, a stolen device key can overwrite history. `vlt init` warns. Entry objects are always written with `If-None-Match: *` |
 | CLI device key at rest | OS keyring (Secret Service or KWallet) when available; otherwise wrapped by the master password |
 | IAM provisioning | vlt never holds admin credentials; enrollment and revocation print the IAM policy and `aws` (or RustFS `mc admin`) commands for me to run |
+| Local start | `vlt init --local` creates a vault with no bucket; `vlt attach` uploads it to a bucket later, after which devices can enroll |
 | Licence | MIT; every dependency MIT, Apache-2.0, BSD, ISC, Zlib, or Unicode, enforced with `cargo-deny` |
 
 ### Still open

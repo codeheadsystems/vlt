@@ -32,7 +32,7 @@ Setup takes about ten minutes: point it at a bucket in your AWS account or at yo
 
 **Can I use my existing pass tools?** The CLI verbs and entry format match pass, so muscle memory and most scripts carry over. pass itself cannot read the S3 store directly, but `vlt export --pass` writes a real `~/.password-store` any time.
 
-**Does it work offline?** Yes. Every client keeps an encrypted local mirror. Reads work offline; edits queue and sync later.
+**Does it work offline?** Yes. Every client keeps an encrypted local mirror with full history. Reads work offline; edits queue and sync later. You can even start with no bucket at all, on one machine, and attach a bucket later when you want a second device.
 
 **Do I need AWS?** No. Any S3-compatible server works, and RustFS is the supported self-hosted option. Both RustFS setups are supported. On a single disk, vlt keeps the revision history itself. On four or more disks with erasure coding, RustFS also versions every object, so history is kept twice.
 

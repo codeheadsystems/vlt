@@ -16,14 +16,26 @@ S3-compatible bucket (AWS S3 or RustFS) that holds ciphertext. The project is MI
 The spec is normative. Where code and spec disagree, the code is wrong until a spec change is
 proposed and approved.
 
-## Workspace layout
+## Repository layout
 
-| Crate | Role |
-| --- | --- |
-| `crates/vlt-core` | Crypto, formats, index, merge, history, sync engine. No I/O beyond traits, no async runtime in the public API, no filesystem access. Builds for `wasm32-unknown-unknown` and stays UniFFI-friendly |
-| `crates/vlt-store` | S3 backend, local encrypted mirror, write queue, capability probe |
-| `crates/vlt-cli` | The `vlt` binary, agent, clipboard, completion |
-| `crates/vlt-import` | Bitwarden and pass import, pass export |
+The repository is a monorepo for every vlt client: the CLI, Android, the Firefox extension, and the
+optional Linux desktop app all build from it against the one Rust core.
+
+| Path | Role | Phase |
+| --- | --- | --- |
+| `crates/vlt-core` | Crypto, formats, index, merge, history, sync engine. No I/O beyond traits, no async runtime in the public API, no filesystem access. Builds for `wasm32-unknown-unknown` and stays UniFFI-friendly | 2 |
+| `crates/vlt-store` | S3 backend, local encrypted mirror, write queue, capability probe | 2 |
+| `crates/vlt-cli` | The `vlt` binary, agent, clipboard, completion | 2 |
+| `crates/vlt-import` | Bitwarden and pass import, pass export | 2 |
+| `crates/vlt-ffi` | UniFFI bindings over `vlt-core` for Android | 3 |
+| `crates/vlt-wasm` | `wasm-bindgen` bindings over `vlt-core` for the Firefox extension | 4 |
+| `android/` | Kotlin app (Gradle), consuming `vlt-ffi` | 3 |
+| `firefox/` | WebExtension and native-messaging manifest, consuming the CLI agent and later `vlt-wasm` | 4 |
+| `desktop/` | Optional Linux desktop app | 5 |
+| `spec/` | Spec and test vectors | 1 |
+
+Paths marked with a later phase do not exist yet. Platform code outside `crates/` keeps its own
+native build tool (Gradle, `web-ext`) and reaches Rust only through the binding crates.
 
 ## Commands
 

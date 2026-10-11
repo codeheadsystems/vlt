@@ -1,6 +1,6 @@
 # vlt crypto and storage spec
 
-Format version 1. Status: draft for review, 2026-10-10.
+Format version 1. Status: draft for review, 2026-10-11.
 
 This spec defines how vlt derives and wraps keys, the byte layout of every object it stores, how
 clients authenticate those objects, how the index merges, how history and deletion work, and how
@@ -44,8 +44,9 @@ other client, and the known-answer vectors in `spec/vectors/` check that it does
 33. [pass import and export](#pass-import-and-export)
 34. [Format versioning](#format-versioning)
 35. [CLI exit codes](#cli-exit-codes)
-36. [Portability constraints](#portability-constraints)
-37. [Test vectors](#test-vectors)
+36. [User-facing messages](#user-facing-messages)
+37. [Portability constraints](#portability-constraints)
+38. [Test vectors](#test-vectors)
 
 ## Conventions
 
@@ -79,10 +80,11 @@ The requirements document holds the full threat model. The properties this spec 
 
 | Adversary | Property |
 | --- | --- |
-| Reader of the bucket, including all versions | Learns object count, sizes rounded to 512 bytes (entries) or 4,096 bytes (index), timestamps, the number of enrolled devices, and the plaintext counters `epoch`, `header_seq`, and `index_seq`. Learns no path, URL, username, secret, or device label |
+| Reader of the bucket, including all versions | Learns object count, sizes rounded to 512 bytes (entries) or 4,096 bytes (index), timestamps, the number of enrolled devices, the number, times, and device IDs of enrollment requests (abandoned ones included), and the plaintext counters `epoch`, `header_seq`, and `index_seq`. Learns no path, URL, username, secret, or device label |
 | Writer to the bucket without the vault key (a stolen device AWS key) | Any modification of an object is detected. Replaying an older header or index is detected by any device that has seen a newer one. On a versioned bucket, nothing is destroyed. On single-disk RustFS, which cannot version, the writer can overwrite objects; clients detect it and [repair](#repair) current entries from their mirrors, but history that no mirror holds is lost |
 | Holder of a revoked device's keys | Reads everything written before the rotation that revoked it. Once its AWS key is deleted, reads nothing written after it, provided the secret key was rotated or the master password resists offline guessing (the holder knows the old secret key). While it still has write access, it can feed forged epoch-`e` objects to a device that has not yet seen the rotation |
-| Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. `vlt passwd --rotate` also rotates the vault key, which cuts this off for content written afterwards |
+| Holder of an old master password, after a password change | Can still open the password wrap in older header versions (kept by S3 Versioning) and so recover the vault key of that time. A password change that the user marks as an exposure (`vlt passwd` asks) also rotates the vault key, which cuts this off for content written afterwards |
+| Holder of a photographed invite | Reads all ciphertext and writes, as a stolen device key does, until that device's AWS key is deleted. Obtains the VK only if the user types a comparison code the holder's own request produced |
 | Holder of a powered-off device | Needs the master password (no-keyring CLI), the OS login (keyring CLI), or the device biometric (Android) to unlock |
 
 Out of scope: malware running as the user on an unlocked device, a process with the user's UID
@@ -198,8 +200,8 @@ ct  = AEAD(DWK, nonce, VK_e, "vlt/v1/device-wrap" || vault_id || u32 epoch || de
 
 X25519 lets an enrolled device wrap the VK to a new device's public key without the new device's
 private key ever moving, which is what enrollment by QR code needs. A device wrap proves nothing
-about who wrote it, because `device_pk` is public; first-unlock trust comes from the enrollment
-return code instead (see [Device enrollment](#device-enrollment)).
+about who wrote it, because `device_pk` is public; first-unlock trust comes from the invite instead
+(see [Device enrollment](#device-enrollment)).
 
 ### Password wrap
 
@@ -215,7 +217,8 @@ can produce a password wrap, so a password-path unlock authenticates the VK it y
 
 | Operation | Rewritten | Unchanged |
 | --- | --- | --- |
-| Master password change (CORE-8) | `kdf_salt`, optionally the KDF parameters, the password wrap, `header_seq`, the MAC; then the index is republished to signal the header change | VK, every device wrap, the keyring, every entry object |
+| Master password change (CORE-8) without rotation, and `--recalibrate` | `kdf_salt`, the password wrap, `header_seq`, the MAC (and the KDF parameters, for `--recalibrate`); then the index is republished to signal the header change | VK, every device wrap, the keyring, every entry object |
+| Master password change with rotation | As above, followed by a vault key rotation | Existing entry objects |
 | Vault key rotation (CORE-7) | New VK and epoch, password wrap, every remaining device wrap, the metadata (keyring gains the old VK, rotation commitment set), the MAC, the index (re-sealed under the new epoch) | Existing entry objects. They stay sealed under their original epoch's key, which the keyring keeps |
 
 Rotation protects content written after the revocation. It cannot protect content the revoked
@@ -237,13 +240,16 @@ unless both the `test_kdf` flag is set and the client is a test build. Release b
 memory a bucket writer can make a client allocate before the MAC can be checked, and it fits inside
 `wasm32` and Android memory.
 
-Calibration runs at `vlt init` and at `vlt passwd --recalibrate`. It fixes `p = 1` (WASM has no
+Calibration runs at `vlt init` and at `vlt passwd --recalibrate`, which re-wraps under the current
+password without asking for a new one. It fixes `p = 1` (WASM has no
 threads) and `t = 3`, then picks the largest `m_kib` in `{64, 128, 256}` MiB whose measured
 derivation time on the current device is at most 500 ms. If 64 MiB already takes longer, it uses
 the floor. The 256 MiB cap keeps password unlock possible on a phone or in a browser. The
 requirement targets the slowest enrolled device, so `vlt passwd --recalibrate` is best run on the
-slowest device; `vlt enroll` reports the measured password-unlock time on the new device and
-suggests recalibration when it exceeds 500 ms.
+slowest device. `vlt enroll` measures password-unlock time on the new device and suggests
+recalibration only when it exceeds 2 s. Calibration still targets 500 ms; the higher threshold
+keeps a slightly slower device from prompting on every enrollment, because password unlock is the
+rare path.
 
 Password unlock is the slow path. Day-to-day unlock goes through the device wrap and takes no
 Argon2 work, which keeps per-device unlock under 100 ms.
@@ -257,9 +263,14 @@ The vault lives under a configured prefix (default `vlt/`) in a dedicated bucket
 | `<prefix>header` | Header object | `If-None-Match: *` at init, then `If-Match: <etag>` |
 | `<prefix>index` | Index object | `If-None-Match: *` at init, then `If-Match: <etag>` |
 | `<prefix>e/<object_id hex>` | One entry revision | Always `If-None-Match: *` |
+| `<prefix>enroll/<device_id hex>` | One [enrollment request](#enrollment-request-object) | Always `If-None-Match: *` |
 
 Entry objects are immutable. A well-behaved client never overwrites one; a `412` on an entry `PUT`
 means the object already exists (a retried upload) and the client confirms the stored bytes match.
+Enrollment requests are small, immutable, and stay in the bucket after use, because device keys
+cannot delete.
+
+The prefix is 1 to 64 characters from `[A-Za-z0-9._/-]` and ends in `/`.
 
 ## Extension lists
 
@@ -301,6 +312,7 @@ Clients check these before allocating or decrypting. For objects fetched from th
 | Path | 1,024 bytes |
 | Device label | 1 to 32 characters from `[a-z0-9-]` |
 | Extension list | 64 items |
+| Invite, enrollment request object | 4 KiB |
 | Agent message | 16 MiB |
 
 ## Header object
@@ -354,12 +366,12 @@ Metadata plaintext, sealed as
 | `keyring_count` | `u32` | |
 | keyring entries | `u32 epoch`, `b32 vk` | Every earlier epoch, ascending |
 | `device_info_count` | `u16` | Equals `device_count` |
-| device info | `b16 device_id`, `u8 kind`, `str16 label`, `u64 enrolled_header_seq` | Same order as the device records; IDs must match one to one |
+| device info | `b16 device_id`, `u8 kind`, `str16 label`, `u64 enrolled_header_seq`, `i64 enrolled_unix` | Same order as the device records; IDs must match one to one. `enrolled_unix` is the enrolling device's wall clock, for display by `vlt devices` only |
 | `ext` | `ext` | |
 
 `kind` is `1` CLI, `2` Android, `3` Firefox, `4` desktop. Labels are unique within a vault and are
-used in conflict-copy paths, IAM user names, and `vlt revoke`. Labels live in the encrypted
-metadata so the bucket does not reveal device names.
+used in conflict-copy paths, IAM user names, `vlt devices`, and `vlt revoke`. Labels live in the
+encrypted metadata so the bucket does not reveal device names.
 
 ## Header authentication and pinning
 
@@ -396,12 +408,11 @@ First-unlock trust depends on how the device obtains the VK:
 
 | Path | Trust anchor |
 | --- | --- |
-| Password and secret key (kit path, `vlt init`) | The password wrap. Only an AUK holder can produce it. `vault_id` must equal the kit's |
-| Device wrap after `vlt enroll approve` | The enrollment return code, which carries the approver's `epoch` and 80 bits of its fingerprint. The new device sets its pins from the code and accepts only a header that satisfies them |
+| Password and secret key (kit path, `vlt init`) | The password wrap. Only an AUK holder can produce it. When the vault configuration line gives a `vault_id`, the header's must equal it |
+| Device wrap after an invite | The invite, which carries the inviting device's `vault_id`, `epoch`, and fingerprint. The new device sets its pins from the invite and accepts only a header that satisfies them |
 
-A return-code pin holds an 80-bit fingerprint prefix; the first header accepted against it replaces
-it with the full fingerprint. A fresh device cannot detect an index rollback that happened before it
-enrolled; its index pins start from the first index it accepts.
+A fresh device cannot detect an index rollback that happened before it enrolled; its index pins
+start from the first index it accepts.
 
 ## Entry object
 
@@ -550,7 +561,8 @@ History works the same on every backend, and S3 Versioning, where present, is a 
 - `vlt log <path>` walks the chain from the index's head, one `GET` per revision, stopping at a zero
   parent. Revisions already in the mirror cost nothing. A parent that returns `404` ends the walk
   with "earlier revisions purged"; device keys cannot delete, so only a purge removes objects.
-- `vlt show <path>@<revision>` shows one revision.
+- `vlt show <path> --rev <revision>` shows one revision. Revisions are selected by flag, not by
+  a path suffix, because paths often contain `@`.
 - `vlt diff <path> <rev-a> <rev-b>` diffs two revisions in memory.
 - `vlt restore <path> <revision>` writes a new revision whose content is the old revision's content,
   with the current head as parent. History is never rewritten.
@@ -636,7 +648,24 @@ character boundary to fit. The conflict copy points at the losing revision's obj
 re-encrypted.
 
 Every conflict and every dropped or reported operation appears in the sync report
-(`vlt sync --json` lists them), so nothing is lost silently.
+(`vlt sync --json` lists them) and in the [status line](#status-line), so nothing is lost silently.
+
+### Conflict resolution
+
+A **conflict copy** is any index path whose last segment contains `.conflict-` followed by a label
+or an 8-character device ID prefix and an optional `-<n>`. Its **original** is the path with that
+suffix removed.
+
+- `vlt conflicts` lists every original with its conflict copies, each copy's writing device, and
+  its revision. A copy whose original cannot be derived (the path was truncated) is listed alone.
+- `vlt resolve <path>` takes an original or a copy. For each copy of the original it shows a diff
+  of the two contents and asks which to keep. Keeping the copy writes its content as a new revision
+  of the original, with the original's head as parent. The copy is then removed. Both versions stay
+  in history, the copy's through its tombstone. `--edit` opens the editor on the kept content before
+  it is saved, with the same in-memory handling as `vlt edit`.
+
+Resolution is a `put` (when the copy wins) followed by a `remove`, queued together; it adds no
+operation type.
 
 ## Sync policy
 
@@ -645,9 +674,10 @@ in `GET` requests, which breaks the cost requirement, so vlt syncs at these poin
 
 | Trigger | What runs |
 | --- | --- |
-| A CLI command served by the agent | The agent answers from the mirror at once, then syncs in the background if the last sync is older than 10 s. A write command exits 0 once the write is queued; the agent publishes it in the background, and `--wait` makes the command wait for publication (and fail with its exit code) |
+| A CLI command served by the agent | The agent answers from the mirror at once, then syncs in the background if the last sync is older than 10 s. A write command exits 0 once the write is queued; the agent publishes it in the background. With `--strict`, the command waits for publication and fails with its exit code |
 | A CLI command with no agent | One sync before the command, with a 3 s network budget; on timeout the command uses the mirror. A write command publishes before exiting |
-| The agent, while unlocked | One sync every 60 s (configurable, minimum 10 s). A locked agent does not poll |
+| The agent, while unlocked | One sync every 60 s (configurable, minimum 10 s) |
+| The agent, while locked with a non-empty write queue | With keyring unlock, the agent tries to publish every 60 s, backing off exponentially to 15 minutes while offline. It first sends the conditional index `GET`, which needs only the AWS key; only when that succeeds does it read the bundle from the keyring, without any interactive prompt, open the device wrap, publish, and lock again. A keyring that would prompt, a `403`, or an integrity error stops background attempts until the next interactive command. A background unlock does not reset `agent.idle_timeout` or `agent.max_lifetime`. Without keyring unlock, the queue waits for the next unlock, and the status line says so. A locked agent with an empty queue does not poll |
 | `vlt sync` | One sync, a conditional `GET` of the header as well, and publication of the write queue, all in the foreground |
 
 One sync is:
@@ -661,9 +691,28 @@ One sync is:
 4. If the write queue is not empty, publish it (below).
 
 A command that cannot reach the backend because of a connection failure, DNS failure, or timeout
-uses the mirror, queues writes, prints `offline` on stderr, and exits 0 (or 9 with `--strict`). Any
-HTTP error response, including `403` from a revoked key, is not "offline": the command fails with
-exit code 7. `vlt status` and every `--json` result show `queued` and `queue_len`.
+uses the mirror, queues writes, and exits 0; the status line reports the queued changes. With
+`--strict` it exits 9 instead. Any HTTP error response, including `403` from a revoked key, is not
+"offline": the command fails with exit code 7. `vlt status` and every `--json` result show `queued`
+and `queue_len`.
+
+A background publish that fails after its command has exited is recorded by the agent as
+`last_publish_error` (exit code and message) until a later publish succeeds.
+
+### Status line
+
+After its own output, every command prints at most one line to stderr summarising background state,
+when stderr is a terminal and any of these hold. The items appear in this order, joined by `; `:
+
+| Condition | Text |
+| --- | --- |
+| `last_publish_error` is set | `sync failed: <message>` |
+| The write queue is not empty | `<n> changes not yet synced` (with `, unlock to sync` on a locked no-keyring agent) |
+| Conflict copies exist | `<n> conflicts, run vlt conflicts` |
+| Rotation pending | `another device is finishing a key change` |
+
+`--json` results carry the same conditions as the fields `last_publish_error`, `queue_len`,
+`conflicts`, and `rotation_pending`. A script that needs certainty uses `--strict`.
 
 Cost at current S3 prices ($0.0004 per 1,000 `GET` requests, $0.005 per 1,000 `PUT` requests,
 $0.023 per GB-month):
@@ -722,19 +771,23 @@ current index, except history objects it has already read.
 
 `vlt init` creates the vault and enrolls the first device:
 
-1. Collect the endpoint, region, bucket, prefix, and device label. Generate `vault_id`, the device
-   ID, and the device key pair.
-2. Print the setup the user runs with admin credentials: create the bucket, enable versioning (and
-   on AWS, optionally Object Lock and a lifecycle rule keeping noncurrent versions 365 days), and
-   create the first device's IAM user, policy, and access key (see [Device
-   credentials](#device-credentials-and-iam-policy)). `vlt init --print-setup` prints this without
-   starting the rest.
-3. Read the device's access key from a prompt or from the standard `AWS_*` variables.
+1. Prompt for the endpoint (empty for AWS), the region (default from the AWS configuration), and the
+   bucket. The prefix defaults to `vlt/` and the device label to the short host name, lower-cased,
+   with characters outside `[a-z0-9-]` replaced by `-` and cut to 32 characters; `--prefix` and
+   `--label` override them without a prompt. Generate `vault_id`, the device ID, and the device key
+   pair.
+2. Print the [setup script](#setup-and-teardown-scripts) and ask the user to run it with admin
+   credentials. `vlt init --print-setup` prints only the script, so it can be piped to a shell.
+3. Read the device's access key: the JSON that the script prints, pasted whole, or the two values
+   at separate prompts, or the standard `AWS_*` variables.
 4. Prompt for the master password twice, calibrate the KDF, and generate the secret key, `VK_1`,
    the header, and an empty index. Nothing has been written yet.
 5. Run the [capability probe](#capability-probe), which writes the header and the index.
-6. Store the device secret bundle, set the pins, and start the agent.
-7. Print the emergency kit, only now that the header write has succeeded.
+6. Store the device secret bundle, set the pins, and start the agent. On a device without an OS
+   keyring, warn that a forgotten master password can only be reset from a device that unlocks
+   without it (a keyring CLI or an Android device), and suggest enrolling one.
+7. Print the emergency kit, only now that the header write has succeeded, and run the [kit
+   confirmation](#kit-confirmation).
 
 ## Capability probe
 
@@ -757,12 +810,13 @@ cannot delete.
 Any other result in steps 3 to 7 means the backend does not honour conditional writes, and
 `vlt init` refuses with exit code 8. The probe bodies are the real header and index, so a backend
 that ignores the conditions has only rewritten identical bytes. The bucket then holds a header; the
-error prints the admin command that empties it.
+error prints the admin command that empties it. A refusal in step 2 for a bucket that already holds
+a vlt header under the prefix suggests `vlt enroll` instead.
 
 | Backend | Versioning | Object Lock | Result |
 | --- | --- | --- | --- |
 | AWS (endpoint is AWS or unset) | Off or suspended | Any | Refuse, and print the command that enables it |
-| AWS | On | Off | Warn, continue |
+| AWS | On | Off | Continue, and note that Object Lock is available |
 | AWS | On | On | Continue; warn if no lifecycle rule keeps noncurrent versions at least 365 days |
 | Other S3 (RustFS) | On | Any | Continue |
 | Other S3 (RustFS) | Off | Any | Warn: "Without versioning a stolen device key can overwrite history; vlt's mirrors are the only copy." Continue |
@@ -774,8 +828,8 @@ key and expecting `403`.
 ## Device credentials and IAM policy
 
 Each device has its own long-lived IAM access key, scoped to the vault's bucket and prefix. vlt
-never holds admin credentials: enrollment and revocation print the commands, and the user runs them
-with admin credentials elsewhere.
+never holds admin credentials: vault creation, enrollment, and revocation print the commands, and
+the user runs them with admin credentials elsewhere.
 
 Device policy (`BUCKET` and `PREFIX` substituted):
 
@@ -809,21 +863,40 @@ Device policy (`BUCKET` and `PREFIX` substituted):
 `ListBucket` is not limited to the prefix, because the capability probe checks that the bucket is
 dedicated. The bucket is dedicated, so this exposes nothing else.
 
-AWS commands printed for a new device with label `L` and vault ID prefix `V` (first 8 hex
-characters):
+On AWS, the policy also carries a statement that makes entry objects and enrollment requests
+write-once against a stolen key, using the condition key that S3 provides for conditional writes:
+
+```json
+{
+  "Effect": "Deny",
+  "Action": "s3:PutObject",
+  "Resource": ["arn:aws:s3:::BUCKET/PREFIXe/*", "arn:aws:s3:::BUCKET/PREFIXenroll/*"],
+  "Condition": {"Null": {"s3:if-none-match": "true"}}
+}
+```
+
+`vlt doctor` checks it by sending an unconditional `PUT` to a fresh entry key and expecting `403`.
+RustFS support for this condition key is checked in milestone 2; without it, overwrites remain
+possible there, and are detected as described in [Repair](#repair).
+
+AWS commands for a new device with label `L` and vault ID prefix `V` (first 8 hex characters):
 
 ```sh
 aws iam create-user --user-name vlt-V-L
 aws iam put-user-policy --user-name vlt-V-L --policy-name vlt-device \
-    --policy-document file://vlt-device-policy.json
+    --policy-document file:///dev/stdin <<'EOF'
+<device policy>
+EOF
 aws iam create-access-key --user-name vlt-V-L
 ```
 
 Revocation:
 
 ```sh
-aws iam list-access-keys --user-name vlt-V-L
-aws iam delete-access-key --user-name vlt-V-L --access-key-id AKIA...
+for k in $(aws iam list-access-keys --user-name vlt-V-L \
+        --query 'AccessKeyMetadata[].AccessKeyId' --output text); do
+    aws iam delete-access-key --user-name vlt-V-L --access-key-id "$k"
+done
 aws iam delete-user-policy --user-name vlt-V-L --policy-name vlt-device
 aws iam delete-user --user-name vlt-V-L
 ```
@@ -833,15 +906,46 @@ same `Allow` statements (RustFS denies anything not allowed, so the `Deny` state
 clarity):
 
 ```sh
-mc admin policy create A vlt-device-V vlt-device-policy.json
-mc admin user add A vlt-V-L <generated secret>
+secret=$(head -c 30 /dev/urandom | base64 | tr -d '+/=')
+mc admin policy create A vlt-device-V /dev/stdin <<'EOF'
+<device policy>
+EOF
+mc admin user add A vlt-V-L "$secret"
 mc admin policy attach A vlt-device-V --user vlt-V-L
+printf '{"AccessKey":{"AccessKeyId":"vlt-V-L","SecretAccessKey":"%s"}}\n' "$secret"
 # revoke
 mc admin user remove A vlt-V-L
 ```
 
-The exact RustFS command set is checked against RustFS's documentation and the integration tests in
-milestone 2, and this section is corrected if it differs.
+The RustFS commands end by printing the key in the same JSON shape as `aws iam create-access-key`,
+so vlt reads the key the same way on both backends. The exact RustFS command set is checked against
+RustFS's documentation and the integration tests in milestone 2, and this section is corrected if it
+differs.
+
+### Setup and teardown scripts
+
+vlt prints admin steps as a complete POSIX shell script with every JSON document inline, so the user
+never writes a file by hand. Each script starts with `set -eu` and a comment naming the bucket,
+prefix, and device.
+
+| Script | Printed by | Contents |
+| --- | --- | --- |
+| Setup | `vlt init`, `vlt init --print-setup` | Create the bucket; enable versioning; add lifecycle rules, filtered to the keys `<prefix>header` and `<prefix>index`, that expire their noncurrent versions after 365 days; Object Lock in governance mode as commented-out lines; then the device commands above |
+| Device | `vlt invite`, and `vlt enroll` on the kit path | The device commands above |
+| Revocation | `vlt revoke` | The revocation commands above; the script looks up the access key IDs itself |
+| Teardown | `vlt teardown` | Delete every object version and delete marker in the bucket, then the bucket, then every enrolled device's IAM user and policy |
+
+The lifecycle rules match only the header and index keys. An entry object or request is written once
+by honest clients, but a stolen device key can `PUT` over one; on a versioned bucket the original
+becomes a noncurrent version, which a rule covering the whole prefix would expire after a year.
+Scoping the rules keeps every noncurrent entry version.
+
+Object Lock is optional. Governance mode lets an admin with `s3:BypassGovernanceRetention` purge and
+tear down; compliance mode would block both until retention expires, so the script does not offer
+it.
+
+`vlt teardown` only prints. It runs on an enrolled device, which knows the device labels, and it
+reminds the user to write an export first.
 
 ## Device key storage
 
@@ -856,9 +960,20 @@ metadata.
 | Android (phase 3) | Bundle sealed by an Android Keystore key that requires biometric authentication | Biometric |
 
 `vlt config set unlock.require_password true` makes a keyring-equipped CLI use the password-sealed
-file instead. Independently of unlock method, `vlt kit`, `vlt revoke`, `vlt passwd`, and every
-export ask for the master password and check it against the header's password wrap. `vlt passwd
---forgotten` is the one exception (see [Master password change](#master-password-change)).
+file instead. Independently of unlock method, `vlt kit`, `vlt invite`, `vlt revoke`, `vlt passwd`,
+and every export ask for the master password and check it against the header's password wrap.
+`vlt passwd --forgotten` is the one exception (see [Master password
+change](#master-password-change)).
+
+### Password check
+
+A device that unlocks without the master password never asks for it, so the user can forget it
+unnoticed. Every 14 days (`unlock.password_check_days`, `0` disables), the first interactive unlock
+on a keyring CLI or Android device also asks for the master password and checks it against the
+password wrap. The check never blocks access. A wrong answer or a skip unlocks as usual, shows "If
+you have forgotten the master password, run `vlt passwd --forgotten` now, while this device can
+still unlock without it", and asks again at the next day's first unlock. The date of the last
+successful check lives in the mirror `state`.
 
 Password-sealed device file:
 
@@ -888,49 +1003,136 @@ password still unlocks that device.
 
 ## Device enrollment
 
-Enrollment always has two halves: the user creates the device's AWS key with admin credentials, and
-an existing secret (an enrolled device, or the master password plus emergency kit) gives the new
-device the VK.
+Enrollment has two halves: the user creates the new device's AWS key with admin credentials, and an
+existing secret gives the new device the VK. The usual path is an invite from an enrolled device;
+the kit path uses the master password and the emergency kit instead.
 
-1. On the new device, run `vlt enroll start --label <label>`. It generates the device ID and X25519
-   key pair, prints the IAM commands and policy, and shows an **enrollment code** as text and as a
-   QR code:
-   `vlt-enroll:1:<vault_id hex>:<device_id hex>:<kind>:<label>:<device_pk base64url, no padding>`.
-   It also shows the **comparison code**,
-   `crock(SHA-256("vlt/v1/enroll-compare" || code)[0..10])` in four groups of four.
-2. Run the IAM commands with admin credentials and give the access key to the new device (prompted,
-   or read from the standard `AWS_*` variables).
-3. Authorise the device by one of two paths:
-   - Approve path. On an enrolled device, run `vlt enroll approve <code>` (or scan the QR code). The
-     user checks that both screens show the same comparison code; 80 bits means an attacker who can
-     swap the code cannot find a key pair whose code compares equal. The approver refuses a
-     duplicate label, adds the device record and metadata entry, increments `header_seq`, recomputes
-     the MAC, writes the header with `If-Match`, and republishes the index. It then shows a **return
-     code**, `vlt-approved:1:<epoch>:<crock(fingerprint[0..10])>`, as text and QR. The user enters
-     or scans it on the new device, which sets its pins from it.
-   - Kit path. On the new device, enter the master password and the secret key from the emergency
-     kit. The new device unwraps the VK through the password wrap, adds its own device record the
-     same way, and pins the result.
-4. The new device unlocks through its device wrap, checks the header against its pins, and fills
-   its mirror.
+### Invite path
 
-`vlt init` enrolls the first device as part of creating the vault.
+1. On an enrolled device, run `vlt invite <label>`. It asks for the master password and checks it
+   against the password wrap, because an invite grants lasting access. It refuses a label already in
+   use, prints the [device script](#setup-and-teardown-scripts), and reads the access key the script
+   prints.
+2. The inviting device generates the new device's `device_id` and a 32-byte `invite_secret`, records
+   a **pending invite** (label, access key ID, and creation time; no secrets) in its mirror `state`,
+   and shows the **invite** as a QR code, with a warning that the code holds the new device's AWS
+   key. `--text` also prints it as a line, for a new device without a camera; the line goes to the
+   terminal only and is cleared when enrollment ends.
+3. On the new device, run `vlt enroll` and scan the invite or paste it at a hidden prompt (never as
+   a command-line argument). The new device decodes it strictly, sets its pins from it, generates
+   its X25519 key pair, builds the [enrollment request](#enrollment-request-object), and `PUT`s it
+   with the access key from the invite and `If-None-Match: *`. On `412` it `GET`s the stored object
+   and continues only if it is byte-identical to its own request (a retried upload); otherwise it
+   reports that someone else answered this invite and stops. It then shows the **comparison code**
+   of its own request bytes.
+4. The inviting device polls for the request, opens it, and checks `device_id` and `kind`. It asks
+   the user to type the comparison code shown on the new device and compares it with the code of
+   the bytes it fetched. It approves exactly those bytes and never refetches. On a match it adds the
+   device record and metadata entry, increments `header_seq`, recomputes the MAC, writes the header
+   with `If-Match`, republishes the index, and deletes the pending invite.
+5. The new device polls the header until its device record appears, unlocks through its device
+   wrap, checks the header against the pins from the invite, and fills its mirror. A new device
+   without an OS keyring then asks for the master password, checks it against the password wrap,
+   and seals its device file with it.
+
+A `412` on the header write in step 4 or in the kit path makes the writing device refetch the
+header, check it against its pins, check again that the label is unused, wrap the VK of the header's
+current epoch, and retry, without asking for the comparison code again.
+
+Both devices poll every 2 s and give up after 15 minutes. The invite secret and the new device's key
+pair live only in memory, so an interrupted enrollment starts again with a new invite. A cancelled,
+expired, or interrupted invite leaves its pending-invite record, and with it a live access key.
+`vlt devices` and the status line list pending invites as "invited, not enrolled",
+`vlt revoke <label>` prints only the revocation script for one, and the teardown script includes
+them. The device script tolerates an IAM user that already exists, so a label can be invited again.
+
+A request that fails to open, a `device_id` that differs from the invite's, a `kind` outside 1 to 4,
+or a typed code that does not match is treated as a compromised invite: the inviting device cancels
+it, prints the revocation script for its access key, and exits with code 6.
+
+The invite contains the new device's long-lived AWS key, so a photograph of it gives the same
+access as a stolen device key for as long as that key lives, whether or not the real device is
+approved. It does not give the VK: only an approved request receives a device wrap, and approval
+needs the comparison code from the device that wrote the request. The code covers 80 bits, so a
+writer who substitutes a request cannot find a key pair whose code compares equal, and typing the
+code, rather than confirming it, keeps a hurried user from approving a request they did not see.
+
+Invite, as text: `vlt-invite:1:` followed by base64url without padding of:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `vault_id` | `b16` | |
+| `device_id` | `b16` | The new device's ID |
+| `epoch` | `u32` | The inviting device's current epoch |
+| `fingerprint` | `b32` | Fingerprint of that epoch's VK |
+| `invite_secret` | `b32` | Random |
+| `label` | `str16` | The new device's label |
+| `endpoint` | `str16` | Empty for AWS |
+| `region` | `str16` | |
+| `bucket` | `str16` | |
+| `prefix` | `str16` | |
+| `access_key_id` | `str16` | The new device's access key |
+| `secret_access_key` | `str16` | |
+| `ext` | `ext` | |
+
+Decoding is strict, as for every structure, and also checks the label and prefix rules from
+[Size limits](#size-limits) and [Bucket layout](#bucket-layout).
+
+### Enrollment request object
+
+Key: `<prefix>enroll/<device_id hex>`, written by the new device with `If-None-Match: *`.
+
+| Offset | Field | Type | Notes |
+| --- | --- | --- | --- |
+| 0 | `magic` | `b4` | `"VLTR"` |
+| 4 | `format_version` | `u16` | `1` |
+| 6 | `flags` | `u16` | `0` |
+| 8 | `vault_id` | `b16` | |
+| 24 | `device_id` | `b16` | Must equal the invite's and the object key's |
+| 40 | `nonce` | `b24` | |
+| 64 | `ciphertext` | rest | `AEAD(K_invite, nonce, plain, bytes 0..64)` |
+
+```
+K_invite = HKDF(ikm = invite_secret, salt = vault_id, info = "vlt/v1/invite")
+```
+
+Plaintext: `u8 kind`, `b32 device_pk`, `ext`. Only a holder of the invite can write a request that
+opens, so a bucket writer without the invite cannot substitute one.
+
+The comparison code is `crock(SHA-256("vlt/v1/enroll-compare" || request object)[0..10])`, shown
+in four groups of four.
+
+### Kit path
+
+1. On the new device, run `vlt enroll` and choose the emergency kit. Scan or paste the kit's
+   [vault configuration line](#emergency-kit-and-recovery), or type its values at separate prompts.
+   The label defaults to the short host name, as in `vlt init`.
+2. vlt prints the device script and reads the access key it prints.
+3. Enter the master password and the secret key. The new device fetches the header, displays its
+   vault ID, unwraps the VK through the password wrap, adds its own device record the same way an
+   inviting device does, and pins the result.
+
+### After enrollment
+
+`vlt init` enrolls the first device as part of creating the vault. `vlt devices` lists every
+enrolled device with its label, kind, and enrollment date, and marks the current one. A new
+device without an OS keyring shows the same forgotten-password warning as `vlt init`.
 
 ## Device revocation and vault key rotation
 
 `vlt revoke <label>` runs on any enrolled device:
 
-1. Print the IAM revocation commands. The user runs them first; until the access key is deleted, the
-   revoked device can still read every object and can still write.
+1. Print the [revocation script](#setup-and-teardown-scripts). The user runs it first; until the
+   access key is deleted, the revoked device can still read every object and can still write. An
+   unknown label fails with the list from `vlt devices`.
 2. Prompt for the master password (needed to rebuild the password wrap) and confirm it by opening
    the current password wrap.
 3. Ask whether the device was lost or stolen (`--lost` or `--retired` skip the question). For a lost
-   or stolen device, generate a new secret key; for a retired one, keep it (`--rotate-secret-key`
-   and `--keep-secret-key` override). The revoked device has read the current secret key from the
-   metadata, and a no-keyring device file can be brute-forced offline at the KDF floor, so after a
-   theft only a new secret key keeps the thief from opening later password wraps with a recovered
-   password. A new secret key makes the printed emergency kit and older encrypted exports' key
-   stale; vlt prints a new kit at the end.
+   or stolen device, generate a new secret key; for a retired one, keep it. The revoked device has
+   read the current secret key from the metadata, and a no-keyring device file can be brute-forced
+   offline at the KDF floor, so after a theft only a new secret key keeps the thief from opening
+   later password wraps with a recovered password. `--rotate-secret-key` and `--keep-secret-key`
+   override the default for scripts; `vlt revoke --help` lists only `--lost` and `--retired`.
    If the master password is forgotten, run `vlt passwd --forgotten` first; revocation needs it.
 4. Fetch the index (epoch `e`) and note its `index_seq` and SHA-256.
 5. Generate `VK_{e+1}`. Build the header: `epoch = e + 1`; metadata with the secret key, the
@@ -941,8 +1143,10 @@ device the VK.
    `header_seq`, and write it with `If-Match: <etag from step 4>`. On `412`, fetch the newer
    epoch-`e` index, check it against this device's own pins, re-seal it under epoch `e + 1`, and
    retry.
-7. Re-seal the local mirror state under the new `K_mirror`. If `--rotate-secret-key` was given,
-   print the new emergency kit.
+7. Re-seal the local mirror state under the new `K_mirror`. If step 3 generated a new secret key,
+   print the new emergency kit, run the [kit confirmation](#kit-confirmation), say that encrypted
+   exports made before now need the old kit (identified by its secret key ending), and offer to
+   write a fresh encrypted export.
 
 Between steps 5 and 6 the bucket holds a header at epoch `e + 1` and the rotation index at epoch
 `e`. Every client accepts that index because it matches the committed hash; a client that publishes
@@ -971,20 +1175,25 @@ why step 1 comes first.
 `vlt passwd` on an enrolled device:
 
 1. Unlock, prompt for the current password, and prompt for the new password twice.
-2. Generate a new `kdf_salt`. Keep the KDF parameters, or recalibrate with `--recalibrate`.
-3. Derive the new AUK with the secret key from the metadata and rewrap the current VK.
-4. Increment `header_seq`, recompute the MAC, write the header with `If-Match`, and republish the
+2. Ask "Could anyone else know the old password?" A yes adds a vault key rotation (step 6).
+   `--rotate` and `--no-rotate` answer it for scripts.
+3. Generate a new `kdf_salt`. Keep the KDF parameters.
+4. Derive the new AUK with the secret key from the metadata and rewrap the current VK.
+5. Increment `header_seq`, recompute the MAC, write the header with `If-Match`, and republish the
    index with the new `header_seq`.
-5. If this device uses a password-sealed device file, reseal it under the new password.
+6. With rotation, perform a vault key rotation as in revocation, without removing a device. Older
+   header versions still hold a password wrap that the old password opens; rotation keeps it from
+   reaching content written afterwards.
+7. If this device uses a password-sealed device file, reseal it under the new password.
 
-No entry object, the keyring, or any device wrap changes. Older header versions still hold a
-password wrap that the old password opens; `vlt passwd --rotate` also performs a vault key rotation
-(as in revocation, without removing a device) so the old password cannot reach content written
-afterwards.
+No entry object, the keyring, or any device wrap changes without rotation.
+
+`vlt passwd --recalibrate` reruns [calibration](#kdf-parameters-and-calibration) and rewraps the VK
+under the current password with a fresh `kdf_salt`. It asks for the current password only.
 
 A user who has forgotten the master password runs `vlt passwd --forgotten` on a device that unlocks
-without it (a keyring CLI or an Android device). It skips the current-password prompt. A no-keyring
-CLI cannot do this, because the password is its only unlock factor.
+without it (a keyring CLI or an Android device). It skips the current-password prompt. A
+no-keyring CLI cannot do this, because the password is its only unlock factor.
 
 ## Deletion and purge
 
@@ -1006,13 +1215,16 @@ has two targets:
    version ID of those keys (from `ListObjectVersions`). It writes a plan file listing them.
 2. Run the printed commands with purge credentials, for example
    `aws s3api delete-object --bucket B --key vlt/e/<id> --version-id <v>` for each line. On a bucket
-   with Object Lock in compliance mode, objects inside their retention period cannot be deleted by
-   anyone until it expires; the plan says so.
+   with Object Lock in governance mode, the commands carry `--bypass-governance-retention` and the
+   credentials need `s3:BypassGovernanceRetention`. On a bucket with Object Lock in compliance mode,
+   objects inside their retention period cannot be deleted by anyone until it expires; the plan says
+   so.
 3. Run `vlt purge commit <plan>`. vlt checks that every listed object is gone (`HEAD` returns `404`)
    and, for `--deleted`, publishes an index with the tombstone removed.
 
-`vlt purge forget <path>` drops a tombstone from the index without deleting any object, which keeps
-the index small; the orphaned objects stay in the bucket.
+A tombstone leaves the index only through `vlt purge commit`. Tombstones cost a few dozen bytes
+each, and removing one without deleting its objects would leave ciphertext that neither `restore`
+nor `purge` could reach again.
 
 Purge does not reach older index versions, which still contain the path in encrypted form until the
 lifecycle rule expires them, other devices' mirrors until they next sync and prune, or encrypted
@@ -1021,8 +1233,9 @@ exports. `vlt purge plan` prints these limits.
 ## Repair
 
 `vlt repair` handles states that sync refuses: a rolled-back, forked, or corrupt index, a rotation
-index that no longer matches its commitment, and entry objects that fail authentication. It always
-shows what it will publish and asks for confirmation.
+index that no longer matches its commitment, and entry objects that fail authentication. Every
+integrity error message names `vlt repair`. It always shows what it will publish and asks for
+confirmation.
 
 | Problem | Repair |
 | --- | --- |
@@ -1042,7 +1255,7 @@ over a Unix socket and never receive key material.
 | Permissions | Directory `0700`, socket `0600`, both owned by the user. The agent refuses to start if the directory has other owners or wider modes |
 | Peer check | Every connection's peer UID (`SO_PEERCRED` on Linux, `getpeereid` on FreeBSD) must equal the agent's UID |
 | Process hardening | `RLIMIT_CORE` set to 0, `PR_SET_DUMPABLE` 0 on Linux, `PROC_TRACE_CTL` disabled on FreeBSD, key buffers `mlock`ed where the platform allows and zeroised on lock and exit |
-| Timeouts | Lock after 15 minutes idle (configurable, `agent.idle_timeout`) and after 8 hours total (`agent.max_lifetime`). Locking zeroises keys; the agent stays running and stops polling. With keyring unlock, the next command unlocks again without a prompt, so the timeout bounds how long keys stay in memory rather than adding a prompt |
+| Timeouts | Lock after 15 minutes idle (configurable, `agent.idle_timeout`) and after 8 hours total (`agent.max_lifetime`). Locking zeroises keys; the agent stays running and stops polling, except to publish a non-empty write queue (see [Sync policy](#sync-policy)). With keyring unlock, the next command unlocks again without a prompt, so the timeout bounds how long keys stay in memory rather than adding a prompt |
 | Start | A CLI command that finds no agent starts one, then unlocks it |
 
 Framing: each message is a `u32` length (at most 16 MiB) followed by that many bytes of UTF-8 JSON.
@@ -1055,8 +1268,9 @@ it supports, and the client restarts the agent if the binaries differ.
 | `op` | Arguments | Result |
 | --- | --- | --- |
 | `hello` | `v`, `client_version` | Supported `v` values, agent version |
-| `status` | | `locked`, `vault_id`, `device_label`, `last_sync`, `queued`, `queue_len` |
+| `status` | | `locked`, `vault_id`, `device_label`, `last_sync`, `queued`, `queue_len`, `last_publish_error`, `conflicts`, `rotation_pending`, `password_check_due` |
 | `unlock` | `password` (absent for keyring unlock) | Nothing |
+| `password_check` | `password` | Whether it matches the password wrap; a match records the date |
 | `lock` | | Nothing |
 | `sync` | | Sync report |
 | `list` | `prefix` | Paths |
@@ -1068,9 +1282,14 @@ it supports, and the client restarts the agent if the binaries differ.
 | `restore` | `path`, `revision` | New head ID and revision |
 | `find`, `grep` | Pattern | Matches |
 | `log` | `path`, `deleted` | Revisions |
+| `conflicts` | | Originals with their conflict copies |
+| `resolve` | `copy`, `keep` (`original` or `copy`), `content` (optional, from `--edit`) | New head ID and revision of the original |
+| `devices` | | Label, kind, enrollment time, and whether it is this device, per device; then pending invites with label and creation time |
 | `passwd` | `password`, `new_password`, `forgotten`, `rotate`, `recalibrate` | Nothing |
-| `enroll_approve` | `code` | Return code |
-| `revoke` | `label`, `password`, `lost`, `rotate_secret_key` | New emergency kit, if any |
+| `invite_create` | `label`, `access_key_id`, `secret_access_key` | Invite ID and invite text |
+| `invite_wait` | `invite_id` | Comparison code once the request arrives, or `expired` |
+| `invite_approve`, `invite_cancel` | `invite_id` | Nothing |
+| `revoke` | `label`, `password`, `lost`, `rotate_secret_key` (optional override) | New emergency kit, if the secret key changed |
 | `kit` | `password` | Emergency kit text |
 | `export` | `password`, `format`, options | A stream of `chunk` responses (base64, at most 1 MiB each) sharing the request `id`, ended by one with `"done": true` |
 
@@ -1087,22 +1306,37 @@ given, which warns.
 
 | Kit field | Example |
 | --- | --- |
-| Vault ID | `3f1c...` (32 hex characters) |
-| Secret key | `VLT1-....` |
-| Endpoint | `https://s3.eu-west-2.amazonaws.com` |
-| Region | `eu-west-2` |
-| Bucket | `ned-vlt` |
-| Prefix | `vlt/` |
+| Printed | `2026-10-11` |
+| Secret key | `VLT1-....`, with its last group repeated as the **secret key ending**, for example `C51A` |
+| Vault configuration | The vault configuration line, as text and as a QR code |
+| Vault ID, endpoint, region, bucket, prefix | The same values, one per line, for typing |
 | Master password | A blank line to fill in by hand, or to leave blank and memorise |
 | Recovery steps | The procedure below |
 
-Recovery on a fresh machine:
+The secret key ending is the last four characters of the secret key text. They come from the check
+value alone, so they identify a secret key without revealing it. Encrypted exports record the same
+check value, so vlt can name the kit an export needs.
 
-1. Create an access key for the new device with admin credentials (the kit lists the commands).
-2. Run `vlt enroll start --label <name>` with the kit's endpoint, region, bucket, prefix, and vault
-   ID.
-3. Choose the kit path: enter the master password and the secret key.
-4. The device unwraps the VK, enrolls itself, and fills its mirror.
+The **vault configuration line** is
+`vlt-vault:1:<vault_id hex>:<region>:<bucket>:<prefix>:<endpoint>`. The endpoint comes last, may
+contain `:`, and is empty for AWS. Bucket and region names contain no `:`, nor does a prefix.
+
+### Kit confirmation
+
+After printing a kit, vlt asks the user to type the secret key ending from the stored copy, and
+finishes only when it matches. The prompt uses the terminal even when standard output goes to a
+file or a printer. This shows that the kit reached paper or a password-protected file
+before the screen scrolls away.
+
+### Recovery on a fresh machine
+
+1. Have admin access to the AWS account or the RustFS server; recovery creates an access key.
+2. Install vlt and run `vlt enroll`. Choose the emergency kit, then scan or type the vault
+   configuration.
+3. Run the device script vlt prints, with admin credentials, and paste the key it prints.
+4. Enter the master password and the secret key. The device unwraps the VK, enrolls itself, and
+   fills its mirror.
+5. Revoke every lost device: `vlt devices` lists them, and `vlt revoke <label>` removes each one.
 
 What each loss costs:
 
@@ -1128,8 +1362,15 @@ requirement's literal form.
 | `flags` | `u16` | Bit 0 `test_kdf`, bit 1 `password_only` |
 | `vault_id` | `b16` | Source vault; used as the HKDF salt and covered by the associated data. Importing into a different vault is allowed |
 | `kdf_block` | `b29` | Fresh salt; the vault's current parameters |
+| `sk_check` | `b4` | The secret key's check value; zero with `password_only` |
 | `nonce` | `b24` | |
 | `ciphertext` | rest | `AEAD(XK, nonce, payload, every preceding byte)` |
+
+Import compares the check value of the secret key the user enters with `sk_check` before any key
+derivation. On a mismatch it names the secret key ending the file needs, so the user can find the
+matching kit, and offers to try the entered key anyway, so that a damaged `sk_check` (which the AEAD
+would also reject) cannot block an import by itself. A decoder rejects a non-zero `sk_check` when
+`password_only` is set.
 
 ```
 XK = HKDF(ikm = Argon2id(NFKC(password), kdf_salt, ...) || sk, salt = vault_id,
@@ -1196,7 +1437,7 @@ plaintext never touches disk). Each item becomes one entry.
 | Rule | Detail |
 | --- | --- |
 | Base | `<folder name>/<item name>`; items without a folder go to the root. Bitwarden folder names already use `/` for nesting |
-| `/` in an item name | Replaced by `∕` (U+2215) |
+| `/` in an item name | Replaced by `-` |
 | Leading or trailing whitespace | Trimmed |
 | Empty name | `Untitled` |
 | Name `.` or `..` | Prefixed with `_` |
@@ -1309,11 +1550,27 @@ defines.
 | 2 | Usage error, or an agent protocol version mismatch |
 | 3 | Path or revision not found |
 | 4 | Locked, wrong password, or device not enrolled |
-| 5 | Sync completed with conflicts (only with `--strict`) |
-| 6 | Integrity error: authentication failure, rollback, fork, or malformed object |
+| 5 | Writes published with conflicts (only with `--strict`) |
+| 6 | Integrity error: authentication failure, rollback, fork, malformed object, or a compromised invite |
 | 7 | Backend error: an HTTP error response, or no network with no mirror to fall back on |
 | 8 | Backend lacks a required capability |
 | 9 | Writes were queued but not published (only with `--strict`) |
+
+## User-facing messages
+
+CLI output, prompts, and errors use the user's terms. The words `epoch`, `keyring` (for the vault
+key history), `fingerprint`, `pin`, and `rotation pending` do not appear; the user sees "vault key",
+"the vault key was changed", and "another device is finishing a key change".
+
+| Situation | Message names |
+| --- | --- |
+| Any integrity error (exit code 6) | What failed, and `vlt repair` |
+| `403` from the backend | "This device's access key was rejected; it may have been revoked or deleted" |
+| A kit-path secret key without the `VLT1-` prefix that looks like an AWS secret access key | "That looks like an AWS secret access key; the vlt secret key starts with VLT1- and is on the emergency kit" |
+| `vlt init` against a bucket that already holds a vault | `vlt enroll` |
+| An encrypted export that needs another secret key | The secret key ending it needs |
+| An unknown label | The labels from `vlt devices` |
+| A device whose wrap was removed | "This device has been revoked" and `vlt enroll` |
 
 ## Portability constraints
 
@@ -1344,14 +1601,14 @@ in its test suite.
 | `kdf.json` | NFKC normalisation, Argon2id `pw_key` and AUK, with the test parameters and with the floor parameters; the parameter bounds |
 | `subkeys.json` | Every `K_purpose` for two epochs |
 | `wraps.json` | Password wrap and device wraps of a fixed VK |
-| `header.json` | A full header after a rotation: two devices, a one-entry keyring, a rotation commitment, and the MAC |
+| `header.json` | A full header after a rotation: two devices with enrollment times, a one-entry keyring, a rotation commitment, and the MAC |
 | `entry.json` | Entry objects: a first revision, an edit, and one whose content crosses a 512-byte boundary |
 | `index.json` | An index with entries, a tombstone, and an applied table, sealed and padded; the rotation index the header commits to |
 | `device-file.json` | A password-sealed device file |
-| `export.json` | Encrypted exports with history, with and without the secret key |
-| `enrollment.json` | An enrollment code, its comparison code, and a return code |
+| `export.json` | Encrypted exports with history, with and without the secret key, including `sk_check` |
+| `enrollment.json` | An invite, `K_invite`, an enrollment request object, its comparison code, and a vault configuration line |
 | `entry-text.json` | Parsing cases for the entry text format, including blocks, `otpauth://`, and a separator |
-| `tamper.json` | For each object kind, inputs with one flipped byte per field, each of which must be rejected |
+| `tamper.json` | For each object kind, including enrollment requests, inputs with one flipped byte per field, each of which must be rejected |
 
 The vectors were generated by a throwaway program written against the decided crates, and the
 Argon2id, HKDF, HMAC, NFKC, X25519, and XChaCha20-Poly1305 values were cross-checked with

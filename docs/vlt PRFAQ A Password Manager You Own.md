@@ -16,7 +16,7 @@ Hosted password managers are convenient until the pricing changes, the free tier
 
 > "I wanted pass on my phone and in my browser without trusting anyone's server or anyone's pricing page," said Ned, the author. "`vlt` costs me cents a year, and if I ever want out, one command writes a standard pass store."
 
-Setup takes about ten minutes: point it at a bucket in your AWS account or at your own RustFS server, run `vlt init`, and import a Bitwarden or pass export. `vlt init` prints an emergency kit to keep in a drawer. Enroll a phone by creating an AWS key for it with the commands `vlt` prints, then scanning a QR code; unlock it with a fingerprint after that. In Firefox, the extension fills logins on the matching site with one click.
+Setup takes about ten minutes: point it at a bucket in your AWS account or at your own RustFS server, run `vlt init`, and import a Bitwarden or pass export. `vlt init` prints an emergency kit to keep in a drawer. Enroll a phone by running `vlt invite phone` on the laptop, running the script it prints to create the phone's AWS key, then scanning the QR code the laptop shows; unlock it with a fingerprint after that. In Firefox, the extension fills logins on the matching site with one click.
 
 `vlt` is available today as source on GitHub, with CLI builds for Linux and FreeBSD and an Android APK.
 
@@ -26,7 +26,7 @@ Setup takes about ten minutes: point it at a bucket in your AWS account or at yo
 
 **What if my phone is stolen?** The thief gets the phone's AWS key and an encrypted local copy. Unlocking still needs your fingerprint or master password plus the vault's secret key. Delete the phone's AWS key with the IAM commands `vlt` prints (vlt never holds admin credentials), then revoke its enrollment from any other device, and the vault key rotates.
 
-**What if I forget my master password?** There is no reset; that is the point of zero-knowledge. Any still-enrolled device that unlocks without it (a phone with a fingerprint, or a computer with an OS keyring) can set a new one. The emergency kit plus an enrolled device also works. Losing every device and the password means losing the vault, so keep an encrypted export offline.
+**What if I forget my master password?** There is no reset; that is the point of zero-knowledge. Any still-enrolled device that unlocks without it (a phone with a fingerprint, or a computer with an OS keyring) can set a new one. Losing every device and the password means losing the vault, so keep an encrypted export offline.
 
 **How much does it cost?** S3 storage and requests for a personal vault come to cents per year at current S3 prices. There is no subscription, and a self-hosted RustFS server costs nothing beyond your own hardware.
 

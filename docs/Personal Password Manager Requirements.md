@@ -34,7 +34,7 @@ The bucket is treated as hostile: anything that can read it must learn nothing b
 | Thief with a device's AWS key | Read all objects; write new objects and new versions | Decrypt anything; permanently destroy history on a versioned bucket (on single-disk RustFS, which cannot version, the thief can overwrite history; `vlt init` warns about this) |
 | Thief with a powered-off or locked device | Copy the local cache and device key file | Unlock without the master password, device biometric, or OS login (the CLI keeps its device key in the OS keyring, or wraps it with the master password where no keyring exists) |
 | Malicious web page | Trigger autofill prompts | Receive credentials for a different origin |
-| Me, months later | Forget the master password while at least one device is still enrolled | Lose the vault (an enrolled device sets a new password) |
+| Me, months later | Forget the master password while at least one device is still enrolled | Lose the vault (an enrolled device that unlocks without the password sets a new one) |
 
 Forgetting the master password and losing every enrolled device loses the vault. No one, including me, can recover it; the emergency kit holds the secret key but not the password.
 
@@ -83,6 +83,7 @@ Every client embeds the same core, so encryption happens before anything leaves 
 | `vlt/header` | Format version, Argon2id parameters, the vault key wrapped once by password + secret key and once per enrolled device (the equivalent of pass's `.gpg-id` recipients) | Wraps only; header itself is authenticated, not secret |
 | `vlt/index` | Map of entry path (`Email/zx2c4.com`) to entry ID and revision | Yes |
 | `vlt/e/<128-bit random ID>` | One entry, padded to a 512-byte multiple to blur length | Yes |
+| `vlt/enroll/<device ID>` | A new device's enrollment request, sealed under a key from the invite QR code | Yes |
 
 ### Entry format
 

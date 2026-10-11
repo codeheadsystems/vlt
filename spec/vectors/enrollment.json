@@ -1,16 +1,34 @@
 {
-  "description": "Enrollment code shown by the new device, the comparison code both devices display (crock(SHA-256(\"vlt/v1/enroll-compare\" || code)[0..10]) in groups of four), and the return code the approver shows (epoch and crock(fingerprint[0..10])).",
+  "description": "Invite (binary payload and its vlt-invite:1: text form), K_invite = HKDF(invite_secret, salt = vault_id, info = \"vlt/v1/invite\"), the enrollment request object the new device writes (AD is its 64-byte prefix), the comparison code crock(SHA-256(\"vlt/v1/enroll-compare\" || request object)[0..10]) in groups of four, and vault configuration lines for AWS (empty endpoint) and RustFS.",
   "vault_id": "7f9c67544c9db6e3ee2a2d77fd1e1be3",
-  "device_id": "5dec0c2b18b567ae95c8cf3b9fa4a3ea",
-  "kind": 2,
-  "label": "pixel",
-  "device_pk": "d3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd46",
-  "enrollment_code": "vlt-enroll:1:7f9c67544c9db6e3ee2a2d77fd1e1be3:5dec0c2b18b567ae95c8cf3b9fa4a3ea:2:pixel:00BtlbufDyk648psWNjh8CUgtDOnWIFnfyR3UuR5vUY",
-  "comparison_code": "3EG5-9D0V-X92V-BKSE",
-  "approver": {
+  "invite": {
+    "device_id": "5dec0c2b18b567ae95c8cf3b9fa4a3ea",
     "epoch": 2,
     "vk": "73c92df917bd24579d72aa3be17e65842fdc72418b8d8eec873e716809878a15",
-    "fingerprint": "f7e918037f3d67cd0d3a8dc3e486ebb341f6dea674ce2ad28d0128605d6ae858"
+    "fingerprint": "f7e918037f3d67cd0d3a8dc3e486ebb341f6dea674ce2ad28d0128605d6ae858",
+    "invite_secret": "0498ed9b2ffc756b35328f9f9a7e8feba4139355a7e01bb846053b4e11857aa5",
+    "label": "pixel",
+    "endpoint": "",
+    "region": "eu-west-2",
+    "bucket": "ned-vlt",
+    "prefix": "vlt/",
+    "access_key_id": "AKIAEXAMPLEPIXEL0001",
+    "secret_access_key": "pixelSecretExampleKey0000000000000000000",
+    "payload": "7f9c67544c9db6e3ee2a2d77fd1e1be35dec0c2b18b567ae95c8cf3b9fa4a3ea00000002f7e918037f3d67cd0d3a8dc3e486ebb341f6dea674ce2ad28d0128605d6ae8580498ed9b2ffc756b35328f9f9a7e8feba4139355a7e01bb846053b4e11857aa50005706978656c0000000965752d776573742d3200076e65642d766c740004766c742f0014414b49414558414d504c45504958454c303030310028706978656c5365637265744578616d706c654b6579303030303030303030303030303030303030300000",
+    "text": "vlt-invite:1:f5xnVEydtuPuKi13_R4b413sDCsYtWeulcjPO5-ko-oAAAAC9-kYA389Z80NOo3D5Ibrs0H23qZ0zirSjQEoYF1q6FgEmO2bL_x1azUyj5-afo_rpBOTVafgG7hGBTtOEYV6pQAFcGl4ZWwAAAAJZXUtd2VzdC0yAAduZWQtdmx0AAR2bHQvABRBS0lBRVhBTVBMRVBJWEVMMDAwMQAocGl4ZWxTZWNyZXRFeGFtcGxlS2V5MDAwMDAwMDAwMDAwMDAwMDAwMAAA"
   },
-  "return_code": "vlt-approved:1:2:YZMHG0VZ7NKWT39T"
+  "request": {
+    "k_invite": "801922267133afeef579553edc3702ab9f762785449c1bde79d94057ec03b0d3",
+    "kind": 2,
+    "device_pk": "d3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd46",
+    "nonce": "398d84eedc1df122c5bc1ce5534f5ab08f0ae82737863b9e",
+    "plain": "02d3406d95bb9f0f293ae3ca6c58d8e1f02520b433a75881677f247752e479bd460000",
+    "object_key": "vlt/enroll/5dec0c2b18b567ae95c8cf3b9fa4a3ea",
+    "object": "564c5452000100007f9c67544c9db6e3ee2a2d77fd1e1be35dec0c2b18b567ae95c8cf3b9fa4a3ea398d84eedc1df122c5bc1ce5534f5ab08f0ae82737863b9e70c39153388cbe15da8d413c1455e2db4e053d42867b7a1e46e16dbbe99aba956795fd96081f8d642487c5d9fcc40dcf18f877"
+  },
+  "comparison_code": "82Q7-9204-FX50-W3NX",
+  "vault_configuration_lines": [
+    "vlt-vault:1:7f9c67544c9db6e3ee2a2d77fd1e1be3:eu-west-2:ned-vlt:vlt/:",
+    "vlt-vault:1:7f9c67544c9db6e3ee2a2d77fd1e1be3:us-east-1:vault:vlt/:https://nas.example:9000"
+  ]
 }

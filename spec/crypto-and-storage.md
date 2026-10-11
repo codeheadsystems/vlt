@@ -336,7 +336,7 @@ emit `count = 0` everywhere else.
 
 | Type | Bits | Used in | Value |
 | --- | --- | --- | --- |
-| `0x4001` | copy-safe | Index entry | **Conflict-of**: the UTF-8 path of the conflict copy's original. Marks the entry as a conflict copy. Kept when the copy is edited or moved; it disappears only when `vlt resolve` removes the copy |
+| `0x4001` | copy-safe | Index entry only; a decoder rejects it on a tombstone | **Conflict-of**: the UTF-8 path of the conflict copy's original. Marks the entry as a conflict copy. Kept when the copy is edited or moved; it disappears only when `vlt resolve` removes the copy |
 | `0x4002` | copy-safe | Index entry or tombstone | **History floor**: a `u64` revision, the oldest revision kept after `vlt purge commit --history`. Revisions of this record's chain below it were purged. `remove` copies an entry's floor to its tombstone, and a `put` that reinserts a tombstoned entry (edit-wins-over-delete or `restore`) copies it back; edits and moves keep it; a later purge raises it. See [Local mirror and write queue](#local-mirror-and-write-queue) for how mirrors use it |
 
 Decoders check the values of these types: a conflict-of value is a path that satisfies the path
@@ -419,14 +419,14 @@ Metadata plaintext, sealed as
 | `keyring_count` | `u32` | Equals `epoch - 1` |
 | keyring entries | `u32 epoch`, `b32 vk` | Every earlier epoch, ascending: exactly epochs 1 to `epoch - 1`. With the keyring limit, this caps `epoch` at 1,001 |
 | `legacy_count` | `u16` | Number of earlier lineages, from [rekeys](#rekey); at most 16 |
-| legacy lineages | `b16 vault_id`, `u32 count`, then `count` keyring entries (`u32 epoch`, `b32 vk`) | Each lineage's vault ID and every VK of it, epochs 1 to its last, ascending. Sorted by `vault_id`, none equal to the header's. Keyring entries across the current keyring and every lineage count together toward the keyring limit |
+| legacy lineages | `b16 vault_id`, `u32 count`, then `count` keyring entries (`u32 epoch`, `b32 vk`) | Each lineage's vault ID and every VK of it, epochs 1 to its last, ascending; `count` is at least 1. Sorted by `vault_id`, none equal to the header's. Keyring entries across the current keyring and every lineage count together toward the keyring limit |
 | `device_info_count` | `u16` | Equals `device_count` |
 | device info | `b16 device_id`, `u8 kind`, `str16 label`, `u64 enrolled_header_seq`, `i64 enrolled_unix`, `b16 enrolled_by` | Same order as the device records; IDs must match one to one. `enrolled_unix` is the enrolling device's wall clock, for display by `vlt devices` only. `enrolled_by` is the inviting device, the device itself for the kit path, or zero for the device that ran `vlt init` |
 | `ext` | `ext` | |
 
-`kind` is `1` CLI, `2` Android, `3` Firefox, `4` desktop. Labels are unique within a vault and are
-used in conflict-copy paths, `vlt devices`, and `vlt revoke`. Labels live in the
-encrypted metadata so the bucket does not reveal device names.
+`kind` is `1` CLI, `2` Android, `3` Firefox, `4` desktop; a decoder rejects any other value. Labels
+are unique within a vault and are used in conflict-copy paths, `vlt devices`, and `vlt revoke`.
+Labels live in the encrypted metadata so the bucket does not reveal device names.
 
 ## Header authentication and pinning
 
@@ -513,6 +513,9 @@ Entry plaintext:
 | `content` | `bytes32` | Entry text, at most 1 MiB |
 | `ext` | `ext` | |
 | padding | zero bytes | Up to the size rule below |
+
+`revision` is 1 exactly when `parent_object_id` and `parent_sha256` are all zero bytes; a decoder
+rejects any other combination.
 
 Padding makes the whole object (prefix, ciphertext, and tag) the smallest multiple of 512 bytes that
 holds it, so the smallest entry object is 512 bytes. A decoder requires every padding byte to be
@@ -1862,6 +1865,10 @@ Payload:
 
 Revision: `u64 revision`, `i64 created_unix`, `b16 device_id`, `bytes32 content`.
 
+Entries are sorted by path bytes with unique paths. Tombstones are sorted by path bytes, and
+tombstones with the same path keep the index's order. Revisions within a record have strictly
+descending `revision`. Paths follow the path rules and counters the cap.
+
 `--no-history` writes only the head revision of each entry and no tombstones. The file is sealed in
 one AEAD call, which bounds it by memory; at 5,000 entries with history it is a few tens of MB.
 
@@ -2067,8 +2074,8 @@ Firefox (WASM) reuse it unchanged.
   history are fetch requests from that state machine.
 - `ml-kem` is pure Rust with no operating system dependencies, so it builds for `wasm32` and
   Android like the other primitives.
-- Randomness comes from `getrandom` inside `vlt-core` (with the `wasm_js` backend and its `cfg` flag
-  on WASM). Crate-internal functions take a `rand_core` RNG so that tests and vector generation are
+- Randomness comes from `getrandom` inside `vlt-core` (with its `wasm_js` feature on WASM).
+  Crate-internal functions take a `rand_core` RNG so that tests and vector generation are
   deterministic; the public API does not expose it, because UniFFI cannot express it.
 - It builds for `wasm32-unknown-unknown`, which CI checks.
 - Public types are plain data (byte vectors, strings, integers, enums), which UniFFI and

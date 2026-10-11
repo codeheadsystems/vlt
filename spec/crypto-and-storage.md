@@ -361,6 +361,7 @@ Clients check these before allocating or decrypting. For objects fetched from th
 | Device label | 1 to 32 characters from `[a-z0-9-]` |
 | Extension list | 64 items |
 | Invite, enrollment request object | 4 KiB |
+| Device file | 64 KiB |
 | Agent message | 16 MiB |
 
 ## Header object
